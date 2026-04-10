@@ -5,6 +5,7 @@ MIHOMO_REPO="MetaCubeX/mihomo"
 SERVICE_NAME="mihomo.service"
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+CACHE_HOME="${XDG_CACHE_HOME:-${HOME}/.cache}"
 BIN_DIR="${HOME}/.local/bin"
 MIHOMO_BIN="${BIN_DIR}/mihomo"
 MIHOMO_CONFIG_DIR="${CONFIG_HOME}/mihomo"
@@ -13,6 +14,8 @@ SYSTEMD_USER_DIR="${CONFIG_HOME}/systemd/user"
 SERVICE_FILE="${SYSTEMD_USER_DIR}/${SERVICE_NAME}"
 STATE_DIR="${CONFIG_HOME}/clash-service"
 PROXY_ENV_FILE="${STATE_DIR}/proxy.env"
+CLIENT_INFO_FILE="${STATE_DIR}/client-info.txt"
+DOWNLOAD_CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-${CACHE_HOME}/clash-service}"
 FORCE_DOWNLOAD="${CLASH_SERVICE_FORCE_DOWNLOAD:-0}"
 
 HTTP_PROXY_URL="http://127.0.0.1:7890"
@@ -51,8 +54,9 @@ Commands:
   enable    Only enable proxy variables for future terminals.
   disable   Only disable proxy variables for future terminals.
 
-Set CLASH_SERVICE_FORCE_DOWNLOAD=1 to re-download mihomo even when the
-binary already exists.
+Set CLASH_SERVICE_FORCE_DOWNLOAD=1 to reinstall mihomo even when the
+binary already exists; a cached archive may be reused.
+Set CLASH_SERVICE_CACHE_DIR=/path/to/dir to use a custom download cache.
 EOF
 }
 
@@ -164,39 +168,108 @@ detect_mihomo_asset_patterns() {
   esac
 }
 
+detect_mihomo_asset_globs() {
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      printf '%s\n' \
+        'mihomo-linux-amd64-v1-v*.gz' \
+        'mihomo-linux-amd64-v1-go*-v*.gz' \
+        'mihomo-linux-amd64-v*.gz'
+      ;;
+    i386 | i686)
+      printf '%s\n' 'mihomo-linux-386-v*.gz'
+      ;;
+    aarch64 | arm64)
+      printf '%s\n' \
+        'mihomo-linux-arm64-v8-v*.gz' \
+        'mihomo-linux-arm64-v*.gz'
+      ;;
+    armv7l | armv7*)
+      printf '%s\n' 'mihomo-linux-armv7-v*.gz'
+      ;;
+    armv6l | armv6*)
+      printf '%s\n' 'mihomo-linux-armv6-v*.gz'
+      ;;
+    arm*)
+      printf '%s\n' 'mihomo-linux-arm-v*.gz'
+      ;;
+    *) die "不支持的 CPU 架构: $(uname -m)" ;;
+  esac
+}
+
+find_cached_mihomo_archive() {
+  local pattern
+  local archive
+
+  [ -d "$DOWNLOAD_CACHE_DIR" ] || return 1
+
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    archive="$(find "$DOWNLOAD_CACHE_DIR" -maxdepth 1 -type f -name "$pattern" | sort -V | tail -n 1 || true)"
+    if [ -n "$archive" ]; then
+      printf '%s' "$archive"
+      return 0
+    fi
+  done <<< "$(detect_mihomo_asset_globs)"
+
+  return 1
+}
+
 download_mihomo() {
   local pattern
   local release_json
   local download_url
+  local archive_path
+  local download_file
   local tmp_dir
   local tmp_bin
 
-  log "查询 mihomo 最新稳定版 release"
-  release_json="$(curl -fsSL "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest")"
-  download_url=""
-
-  while IFS= read -r pattern; do
-    [ -n "$pattern" ] || continue
-    download_url="$(printf '%s\n' "$release_json" | grep -Eo "https://[^\"]+/${pattern}" | head -n 1 || true)"
-    if [ -n "$download_url" ]; then
-      break
-    fi
-  done <<< "$(detect_mihomo_asset_patterns)"
-
-  [ -n "$download_url" ] || die "没有找到匹配当前架构的 mihomo release 资产。"
-
-  mkdir -p "$BIN_DIR"
   tmp_dir="$(mktemp -d)"
   tmp_bin="${tmp_dir}/mihomo"
 
-  log "下载 mihomo: ${download_url}"
-  if ! curl -fL "$download_url" -o "${tmp_dir}/mihomo.gz"; then
-    rm -rf "$tmp_dir"
-    die "下载 mihomo 失败。"
+  mkdir -p "$BIN_DIR" "$DOWNLOAD_CACHE_DIR"
+  archive_path="$(find_cached_mihomo_archive || true)"
+
+  if [ -n "$archive_path" ]; then
+    log "检测到本地 mihomo 压缩包，跳过下载: ${archive_path}"
+  else
+    log "查询 mihomo 最新稳定版 release"
+    log "未发现本地 mihomo 压缩包。网络不好时，可先从 https://github.com/${MIHOMO_REPO}/releases/latest 下载匹配当前架构的 .gz 文件到: ${DOWNLOAD_CACHE_DIR}"
+    if ! release_json="$(curl -fsSL "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest")"; then
+      rm -rf "$tmp_dir"
+      die "查询 mihomo release 失败。可手动下载压缩包到 ${DOWNLOAD_CACHE_DIR} 后重试。"
+    fi
+    download_url=""
+
+    while IFS= read -r pattern; do
+      [ -n "$pattern" ] || continue
+      download_url="$(printf '%s\n' "$release_json" | grep -Eo "https://[^\"]+/${pattern}" | head -n 1 || true)"
+      if [ -n "$download_url" ]; then
+        break
+      fi
+    done <<< "$(detect_mihomo_asset_patterns)"
+
+    [ -n "$download_url" ] || die "没有找到匹配当前架构的 mihomo release 资产。"
+
+    download_file="${download_url##*/}"
+    archive_path="${DOWNLOAD_CACHE_DIR}/${download_file}"
+
+    log "准备下载 mihomo: ${download_url}"
+    log "网络不好时，可先手动下载该文件到: ${archive_path}"
+    log "文件名保持不变，重新运行脚本会自动检测并使用本地压缩包。"
+    if ! curl -fL "$download_url" -o "${tmp_dir}/${download_file}"; then
+      rm -rf "$tmp_dir"
+      die "下载 mihomo 失败。可先手动下载到 ${archive_path} 后重试。"
+    fi
+    if ! install -m 0644 "${tmp_dir}/${download_file}" "$archive_path"; then
+      rm -rf "$tmp_dir"
+      die "保存 mihomo 压缩包失败: ${archive_path}"
+    fi
   fi
-  if ! gzip -dc "${tmp_dir}/mihomo.gz" > "$tmp_bin"; then
+
+  if ! gzip -dc "$archive_path" > "$tmp_bin"; then
     rm -rf "$tmp_dir"
-    die "解压 mihomo 失败。"
+    die "解压 mihomo 失败: ${archive_path}"
   fi
   if ! install -m 0755 "$tmp_bin" "$MIHOMO_BIN"; then
     rm -rf "$tmp_dir"
@@ -329,6 +402,27 @@ EOF
 
   chmod 0600 "$MIHOMO_CONFIG_FILE"
   log "已写入配置: ${MIHOMO_CONFIG_FILE}"
+}
+
+write_client_info() {
+  local server_addr="$1"
+  local server_port="$2"
+  local password="$3"
+  local sni="$4"
+
+  mkdir -p "$STATE_DIR"
+  cat > "$CLIENT_INFO_FILE" <<EOF
+# Generated by client.sh. Keep this file private.
+server: ${server_addr}
+port: ${server_port}
+password: ${password}
+sni: ${sni}
+skip-cert-verify: true
+config: ${MIHOMO_CONFIG_FILE}
+proxy-env: ${PROXY_ENV_FILE}
+EOF
+  chmod 0600 "$CLIENT_INFO_FILE"
+  log "客户端连接信息已保存: ${CLIENT_INFO_FILE}"
 }
 
 write_user_service() {
@@ -503,6 +597,7 @@ install_client() {
 
   install_mihomo_if_needed
   write_mihomo_config "$server_addr" "$server_port" "$password" "$sni"
+  write_client_info "$server_addr" "$server_port" "$password" "$sni"
   write_user_service
   install_shell_loader
   start_service
@@ -512,6 +607,13 @@ install_client() {
 
 安装完成。
 已自动启动 mihomo，并启用后续新终端代理。
+
+客户端连接信息:
+  server: ${server_addr}
+  port: ${server_port}
+  password: ${password}
+  sni: ${sni}
+  saved: ${CLIENT_INFO_FILE}
 
 查看状态:
   bash client.sh status

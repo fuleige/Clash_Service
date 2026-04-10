@@ -45,6 +45,7 @@ sudo bash server.sh install
 - 检测 `trojan-go` 是否已存在，不存在才自动下载
 - 生成自签名证书
 - 写入 `/etc/trojan-go/config.json`
+- 写入 `/etc/trojan-go/client-info.txt`，保存端口、密码、SNI 等连接信息
 - 写入 `/etc/systemd/system/trojan-go.service`
 - 如果检测到 `ufw` 或 `firewalld` 正在运行，自动放行服务端口
 - 执行 `systemctl enable trojan-go.service` 并重启服务
@@ -66,9 +67,11 @@ sudo bash server.sh uninstall
 ```text
 /usr/local/bin/trojan-go
 /etc/trojan-go/config.json
+/etc/trojan-go/client-info.txt
 /etc/trojan-go/certs/server.crt
 /etc/trojan-go/certs/server.key
 /etc/systemd/system/trojan-go.service
+/var/cache/clash-service/trojan-go-linux-<arch>.zip
 ```
 
 如果服务器启用了防火墙，需要放行安装时选择的端口。例如：
@@ -103,6 +106,7 @@ bash client.sh install
 - 检测并自动安装缺少的 `curl`、`gzip`、`ca-certificates`
 - 检测 `mihomo` 是否已存在，不存在才自动下载到 `~/.local/bin/mihomo`
 - 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml`
+- 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt`，保存服务端地址、端口、密码、SNI 等连接信息
 - 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mihomo.service`
 - 在当前 shell 的启动文件中加入一个受控 loader
 - 尝试启用 systemd linger，便于用户服务开机后自动运行
@@ -110,6 +114,17 @@ bash client.sh install
 - 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env`，让后续新终端自动带代理变量
 
 如果直接执行 `bash client.sh start`，但脚本发现 `mihomo` 配置还没生成，会自动进入安装流程。
+
+客户端关键路径：
+
+```text
+~/.local/bin/mihomo
+${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml
+${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt
+${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env
+${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mihomo.service
+${XDG_CACHE_HOME:-$HOME/.cache}/clash-service/mihomo-linux-*.gz
+```
 
 启动客户端并让后续新终端使用代理：
 
@@ -246,11 +261,46 @@ bash client.sh start
 
 如果 `~/.local/bin` 不在 `PATH`，不影响 systemd 服务，因为服务文件使用的是绝对路径。
 
-如果已经存在二进制文件，脚本默认复用现有文件。需要强制重新下载时可以执行：
+如果已经存在二进制文件，脚本默认复用现有文件。需要强制重新安装二进制时可以执行：
 
 ```bash
 CLASH_SERVICE_FORCE_DOWNLOAD=1 sudo bash server.sh install
 CLASH_SERVICE_FORCE_DOWNLOAD=1 bash client.sh install
+```
+
+## 下载缓存
+
+如果 GitHub 网络不稳定，可以先把压缩包下载到固定缓存目录，再重新运行安装脚本。脚本会优先检测缓存目录里匹配当前 CPU 架构的文件。
+
+服务端默认缓存目录：
+
+```text
+/var/cache/clash-service
+```
+
+服务端文件名保持为：
+
+```text
+trojan-go-linux-<arch>.zip
+```
+
+客户端默认缓存目录：
+
+```text
+${XDG_CACHE_HOME:-$HOME/.cache}/clash-service
+```
+
+客户端文件名保持为 mihomo release 原始文件名，例如：
+
+```text
+mihomo-linux-amd64-v1-v<version>.gz
+```
+
+也可以用同一个环境变量改缓存目录：
+
+```bash
+CLASH_SERVICE_CACHE_DIR=/path/to/cache sudo bash server.sh install
+CLASH_SERVICE_CACHE_DIR=/path/to/cache bash client.sh install
 ```
 
 ## 安全说明
@@ -261,5 +311,6 @@ CLASH_SERVICE_FORCE_DOWNLOAD=1 bash client.sh install
 - 客户端默认 `skip-cert-verify: true`。
 - 客户端 external controller 没有设置 secret，但只监听 `127.0.0.1`。
 - 默认代理环境变量只影响支持 `http_proxy`、`https_proxy`、`all_proxy` 的命令行程序，不等于全局代理。
+- `/etc/trojan-go/client-info.txt` 和 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt` 会保存明文密码，脚本会设置为 `0600` 权限。
 
 如果需要更接近全局代理，请看 `advanced/README.md` 的 TUN 说明。
