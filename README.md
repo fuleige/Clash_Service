@@ -32,14 +32,14 @@ bash client.sh install
 ~/.config/clash-service/client-info.txt
 ```
 
-启动或停止客户端代理：
+安装后新开的终端里，启动或停止客户端代理：
 
 ```bash
-bash client.sh start
-bash client.sh stop
+clash_service start
+clash_service stop
 ```
 
-客户端启动后会先检测代理节点连通性，检测通过后才启用后续新终端的代理环境变量。
+`clash_service` 会在启动或关闭后自动同步当前终端的代理环境变量。客户端启动后会先检测代理节点连通性，检测通过后才启用代理。
 
 ## 常用命令
 
@@ -53,16 +53,16 @@ sudo bash server.sh status
 sudo bash server.sh uninstall
 ```
 
-客户端：
+客户端，安装后新开的终端推荐使用：
 
 ```bash
-bash client.sh start
-bash client.sh stop
-bash client.sh restart
-bash client.sh status
-bash client.sh enable
-bash client.sh disable
-bash client.sh uninstall
+clash_service start
+clash_service stop
+clash_service restart
+clash_service status
+clash_service enable
+clash_service disable
+clash_service uninstall
 ```
 
 `enable` / `disable` 只切换后续新终端的代理环境变量，不启动或停止 `mihomo`。
@@ -88,7 +88,7 @@ bash client.sh uninstall
 - 写入 `~/.config/mihomo/config.yaml`
 - 写入 `~/.config/clash-service/client-info.txt`
 - 写入 `~/.config/systemd/user/mihomo.service`
-- 在当前 shell 启动文件中加入受控 loader
+- 在当前 shell 启动文件中加入受控 loader 和 `clash_service` 函数
 - 尝试启用 systemd linger
 - 启用并启动 `mihomo.service`
 - 检测 `trojan-service` 代理节点是否可用
@@ -123,6 +123,95 @@ bash client.sh uninstall
 ```
 
 如果设置了 `XDG_CONFIG_HOME` 或 `XDG_CACHE_HOME`，客户端会跟随这些路径。
+
+</details>
+
+<details>
+<summary>启动后怎么修改配置</summary>
+
+最省心的方式是重新跑安装命令，让脚本重新生成配置并重启服务。脚本会备份服务端已有配置和证书；客户端会重新写入本地配置和连接信息。
+
+修改服务端监听端口、密码或 SNI：
+
+```bash
+sudo bash server.sh install
+```
+
+按提示填入新的端口、密码和 SNI。完成后查看新的连接信息：
+
+```bash
+sudo cat /etc/trojan-go/client-info.txt
+```
+
+如果服务器启用了防火墙，脚本会尝试自动放行新端口；仍然连不上时可以手动放行，例如：
+
+```bash
+sudo ufw allow 8443/tcp
+```
+
+修改客户端连接的服务端地址、服务端端口、密码或 SNI：
+
+```bash
+bash client.sh install
+```
+
+按提示填入新的服务端信息。安装后新开的终端里执行：
+
+```bash
+clash_service start
+```
+
+只查看当前客户端保存的连接信息：
+
+```bash
+cat ~/.config/clash-service/client-info.txt
+```
+
+修改客户端本地代理端口，默认是 `7890`：
+
+```bash
+nano ~/.config/mihomo/config.yaml
+```
+
+把这一项改成新端口：
+
+```yaml
+mixed-port: 7891
+```
+
+保存后重启，脚本会按 `config.yaml` 里的 `mixed-port` 重新写入 `~/.config/clash-service/proxy.env`：
+
+```bash
+clash_service restart
+```
+
+一般只需要修改服务端监听端口和客户端连接端口，不建议改本地 `7890`。
+
+修改 mihomo 本地控制端口，默认是 `9090`：
+
+```bash
+nano ~/.config/mihomo/config.yaml
+```
+
+把这一项改成新端口：
+
+```yaml
+external-controller: 127.0.0.1:9091
+```
+
+以后启动检测时也要告诉脚本新的 controller 地址。如果只是临时使用：
+
+```bash
+CLASH_SERVICE_CONTROLLER_URL=http://127.0.0.1:9091 clash_service restart
+```
+
+如果要长期使用，可以把它写进当前 shell 的启动文件：
+
+```bash
+export CLASH_SERVICE_CONTROLLER_URL=http://127.0.0.1:9091
+```
+
+不建议修改 `9090`，除非它和本机已有服务冲突。
 
 </details>
 
@@ -209,16 +298,20 @@ CLASH_SERVICE_FORCE_DOWNLOAD=1 bash client.sh install
 <details>
 <summary>代理环境变量怎么生效</summary>
 
-`client.sh` 不会反复把 `export http_proxy=...` 写进 `~/.bashrc` 或 `~/.zshrc`。它只加入一次受控 loader，后续开关代理只修改：
+`client.sh` 不会反复把 `export http_proxy=...` 写进 `~/.bashrc` 或 `~/.zshrc`。它只加入一次受控 loader 和 `clash_service` shell 函数，后续开关代理只修改：
 
 ```text
 ~/.config/clash-service/proxy.env
 ```
 
-脚本不能反向修改已经打开的父级终端环境变量。所以 `start` 或 `stop` 后：
+脚本不能反向修改已经打开的父级终端环境变量，所以直接运行 `bash client.sh start` 或 `bash client.sh stop` 时仍然不能修改当前终端。安装后新开的终端里建议使用：
 
-- 新开的终端会自动使用最新状态。
-- 当前终端如果要立即同步，需要手动执行：
+```bash
+clash_service start
+clash_service stop
+```
+
+这个 shell 函数会先运行脚本，再自动 source 最新的 `proxy.env`，让当前终端立即同步。直接运行脚本时如果要手动同步，执行：
 
 ```bash
 source ~/.config/clash-service/proxy.env
