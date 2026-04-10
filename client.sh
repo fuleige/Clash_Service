@@ -17,6 +17,12 @@ PROXY_ENV_FILE="${STATE_DIR}/proxy.env"
 CLIENT_INFO_FILE="${STATE_DIR}/client-info.txt"
 DOWNLOAD_CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-${CACHE_HOME}/clash-service}"
 FORCE_DOWNLOAD="${CLASH_SERVICE_FORCE_DOWNLOAD:-0}"
+SKIP_CONNECTIVITY_CHECK="${CLASH_SERVICE_SKIP_CHECK:-0}"
+CONNECTIVITY_TEST_URL="${CLASH_SERVICE_CHECK_URL:-https://www.gstatic.com/generate_204}"
+CONNECTIVITY_TIMEOUT_MS="${CLASH_SERVICE_CHECK_TIMEOUT_MS:-8000}"
+CONNECTIVITY_CURL_TIMEOUT="${CLASH_SERVICE_CHECK_CURL_TIMEOUT:-12}"
+MIHOMO_CONTROLLER_URL="${CLASH_SERVICE_CONTROLLER_URL:-http://127.0.0.1:9090}"
+MIHOMO_PROXY_NAME="${CLASH_SERVICE_PROXY_NAME:-trojan-service}"
 
 HTTP_PROXY_URL="http://127.0.0.1:7890"
 ALL_PROXY_URL="socks5://127.0.0.1:7890"
@@ -57,6 +63,7 @@ Commands:
 Set CLASH_SERVICE_FORCE_DOWNLOAD=1 to reinstall mihomo even when the
 binary already exists; a cached archive may be reused.
 Set CLASH_SERVICE_CACHE_DIR=/path/to/dir to use a custom download cache.
+Set CLASH_SERVICE_SKIP_CHECK=1 to skip the post-start connectivity check.
 EOF
 }
 
@@ -294,6 +301,15 @@ validate_port() {
   local port="$1"
   if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
     die "端口号必须是 1-65535 之间的整数: ${port}"
+  fi
+}
+
+validate_positive_int() {
+  local label="$1"
+  local value="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+    die "${label} 必须是正整数: ${value}"
   fi
 }
 
@@ -564,6 +580,54 @@ restart_service() {
   systemctl --user restart "$SERVICE_NAME"
 }
 
+wait_mihomo_controller() {
+  local attempt=1
+  local max_attempts=10
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if curl -fsS --max-time 1 "${MIHOMO_CONTROLLER_URL}/version" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
+check_proxy_connectivity() {
+  local response=""
+
+  if [ "$SKIP_CONNECTIVITY_CHECK" = "1" ]; then
+    log "已跳过代理连通性检测。"
+    return
+  fi
+
+  command -v curl >/dev/null 2>&1 || die "未找到 curl，无法执行代理连通性检测。"
+  validate_positive_int "CLASH_SERVICE_CHECK_TIMEOUT_MS" "$CONNECTIVITY_TIMEOUT_MS"
+  validate_positive_int "CLASH_SERVICE_CHECK_CURL_TIMEOUT" "$CONNECTIVITY_CURL_TIMEOUT"
+
+  log "等待 mihomo 本地控制端口: ${MIHOMO_CONTROLLER_URL}"
+  if ! wait_mihomo_controller; then
+    write_proxy_disabled_env
+    die "mihomo 已启动，但无法访问本地控制端口 ${MIHOMO_CONTROLLER_URL}。请查看日志: journalctl --user -u ${SERVICE_NAME} -e --no-pager"
+  fi
+
+  log "检测代理节点连通性: ${MIHOMO_PROXY_NAME} -> ${CONNECTIVITY_TEST_URL}"
+  if response="$(curl -fsS --max-time "$CONNECTIVITY_CURL_TIMEOUT" \
+    -G "${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
+    --data-urlencode "timeout=${CONNECTIVITY_TIMEOUT_MS}" \
+    --data-urlencode "url=${CONNECTIVITY_TEST_URL}" 2>/dev/null)" &&
+    printf '%s' "$response" | grep -Eq '"delay"[[:space:]]*:[[:space:]]*[0-9]+'; then
+    log "代理连通性检测通过: ${response}"
+    return
+  fi
+
+  write_proxy_disabled_env
+  die "mihomo 已启动，但代理节点连通性检测失败。请核对服务端地址、端口、密码、SNI、防火墙；如确认只是测试 URL 不通，可设置 CLASH_SERVICE_CHECK_URL 或 CLASH_SERVICE_SKIP_CHECK=1。"
+}
+
 client_config_complete() {
   [ -f "$MIHOMO_CONFIG_FILE" ]
 }
@@ -601,6 +665,7 @@ install_client() {
   write_user_service
   install_shell_loader
   start_service
+  check_proxy_connectivity
   write_proxy_enabled_env
 
   cat <<EOF
@@ -631,6 +696,7 @@ start_client() {
 
   ensure_client_runtime
   start_service
+  check_proxy_connectivity
   write_proxy_enabled_env
 }
 
@@ -695,7 +761,7 @@ main() {
     install) install_client ;;
     start) start_client ;;
     stop) stop_client ;;
-    restart) require_non_root; restart_service ;;
+    restart) require_non_root; restart_service; check_proxy_connectivity ;;
     status) status_client ;;
     enable) require_non_root; install_shell_loader; write_proxy_enabled_env ;;
     disable) require_non_root; write_proxy_disabled_env ;;

@@ -1,6 +1,6 @@
 # Advanced: mihomo TUN Mode
 
-默认 `client.sh` 不启用 TUN。这个目录提供可选实验脚本，用来把 `${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml` 里的 `tun.enable` 在 `true` 和 `false` 之间切换。
+默认 `client.sh` 不启用 TUN。这个目录提供可选实验脚本，用来把 `~/.config/mihomo/config.yaml` 里的 `tun.enable` 在 `true` 和 `false` 之间切换。
 
 ## TUN 是什么
 
@@ -39,10 +39,10 @@ ls -l ~/.local/bin/mihomo
 确认配置存在：
 
 ```bash
-ls -l "${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml"
+ls -l ~/.config/mihomo/config.yaml
 ```
 
-如果安装客户端时设置了 `XDG_CONFIG_HOME`，这里也使用同一个值。
+如果安装客户端时设置了 `XDG_CONFIG_HOME`，这里也会跟随该路径。
 
 ## 启用 TUN
 
@@ -54,7 +54,7 @@ bash advanced/client-tun.sh enable
 
 脚本会做这些事：
 
-- 备份 `${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml`
+- 备份 `~/.config/mihomo/config.yaml`
 - 确保存在 `tun:` 配置块
 - 设置 `tun.enable: true`
 - 如果缺少 `setcap`，自动安装 `libcap2-bin`

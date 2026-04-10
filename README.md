@@ -29,7 +29,7 @@ bash client.sh install
 按提示填入服务端地址、端口、密码和 SNI。安装结束后客户端也会保存一份连接信息：
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt
+~/.config/clash-service/client-info.txt
 ```
 
 启动或停止客户端代理：
@@ -38,6 +38,8 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt
 bash client.sh start
 bash client.sh stop
 ```
+
+客户端启动后会先检测代理节点连通性，检测通过后才启用后续新终端的代理环境变量。
 
 ## 常用命令
 
@@ -83,13 +85,14 @@ bash client.sh uninstall
 
 - 安装缺少的 `curl`、`gzip`、`ca-certificates`
 - 下载或复用 `mihomo`
-- 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml`
-- 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt`
-- 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mihomo.service`
+- 写入 `~/.config/mihomo/config.yaml`
+- 写入 `~/.config/clash-service/client-info.txt`
+- 写入 `~/.config/systemd/user/mihomo.service`
 - 在当前 shell 启动文件中加入受控 loader
 - 尝试启用 systemd linger
 - 启用并启动 `mihomo.service`
-- 写入 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env`
+- 检测 `trojan-service` 代理节点是否可用
+- 写入 `~/.config/clash-service/proxy.env`
 
 </details>
 
@@ -112,11 +115,48 @@ bash client.sh uninstall
 
 ```text
 ~/.local/bin/mihomo
-${XDG_CONFIG_HOME:-$HOME/.config}/mihomo/config.yaml
-${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt
-${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env
-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mihomo.service
-${XDG_CACHE_HOME:-$HOME/.cache}/clash-service/mihomo-linux-*.gz
+~/.config/mihomo/config.yaml
+~/.config/clash-service/client-info.txt
+~/.config/clash-service/proxy.env
+~/.config/systemd/user/mihomo.service
+~/.cache/clash-service/mihomo-linux-*.gz
+```
+
+如果设置了 `XDG_CONFIG_HOME` 或 `XDG_CACHE_HOME`，客户端会跟随这些路径。
+
+</details>
+
+<details>
+<summary>客户端连通性检测</summary>
+
+`client.sh install`、`client.sh start` 和 `client.sh restart` 会在启动 `mihomo` 后访问本地 controller：
+
+```text
+http://127.0.0.1:9090
+```
+
+然后让 `mihomo` 检测 `trojan-service` 节点访问默认测试地址：
+
+```text
+https://www.gstatic.com/generate_204
+```
+
+检测失败时，脚本不会提示启动成功，也不会启用后续新终端的代理环境变量。可以查看日志：
+
+```bash
+journalctl --user -u mihomo.service -e --no-pager
+```
+
+如果只是测试地址不可用，可以换一个测试 URL：
+
+```bash
+CLASH_SERVICE_CHECK_URL=https://www.cloudflare.com/cdn-cgi/trace bash client.sh start
+```
+
+确认不需要检测时可以跳过：
+
+```bash
+CLASH_SERVICE_SKIP_CHECK=1 bash client.sh start
 ```
 
 </details>
@@ -141,7 +181,7 @@ trojan-go-linux-<arch>.zip
 客户端默认缓存目录：
 
 ```text
-${XDG_CACHE_HOME:-$HOME/.cache}/clash-service
+~/.cache/clash-service
 ```
 
 客户端文件名保持为 mihomo release 原始文件名，例如：
@@ -172,7 +212,7 @@ CLASH_SERVICE_FORCE_DOWNLOAD=1 bash client.sh install
 `client.sh` 不会反复把 `export http_proxy=...` 写进 `~/.bashrc` 或 `~/.zshrc`。它只加入一次受控 loader，后续开关代理只修改：
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env
+~/.config/clash-service/proxy.env
 ```
 
 脚本不能反向修改已经打开的父级终端环境变量。所以 `start` 或 `stop` 后：
@@ -181,7 +221,7 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env
 - 当前终端如果要立即同步，需要手动执行：
 
 ```bash
-source "${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/proxy.env"
+source ~/.config/clash-service/proxy.env
 ```
 
 默认本地代理端口：
@@ -228,6 +268,6 @@ bash client.sh start
 - 客户端默认 `skip-cert-verify: true`。
 - 客户端 external controller 没有设置 secret，但只监听 `127.0.0.1`。
 - 默认代理环境变量只影响支持 `http_proxy`、`https_proxy`、`all_proxy` 的命令行程序，不等于全局代理。
-- `/etc/trojan-go/client-info.txt` 和 `${XDG_CONFIG_HOME:-$HOME/.config}/clash-service/client-info.txt` 会保存明文密码，脚本会设置为 `0600` 权限。
+- `/etc/trojan-go/client-info.txt` 和 `~/.config/clash-service/client-info.txt` 会保存明文密码，脚本会设置为 `0600` 权限。
 
 </details>
