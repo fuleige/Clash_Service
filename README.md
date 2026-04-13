@@ -23,6 +23,14 @@ sudo bash server.sh install
 /etc/trojan-go/client-info.txt
 ```
 
+如果当前环境既没有 `systemd` 也没有 `service`，`install` 只会完成安装，不会在后台常驻。此时需要再执行：
+
+```bash
+sudo bash server.sh start
+```
+
+并保持这个终端不要关闭。
+
 客户端，使用普通用户运行：
 
 ```bash
@@ -43,6 +51,8 @@ clash_service stop
 clash_service restart
 clash_service status
 ```
+
+如果当前环境既没有可用的 `systemd --user`，也没有可用的 `service`，`start` 和 `restart` 会直接前台运行 `mihomo`。这时要把它放在一个专门终端里运行，并保持该终端不要关闭。
 
 ## 脚本会自动做什么
 
@@ -142,6 +152,9 @@ clash_service status
 /etc/trojan-go/certs/server.crt
 /etc/trojan-go/certs/server.key
 /etc/systemd/system/trojan-go.service
+/etc/init.d/trojan-go
+/var/run/trojan-go.pid
+/var/log/trojan-go.log
 ```
 
 客户端：
@@ -152,6 +165,9 @@ clash_service status
 ~/.config/clash-service/client-info.txt
 ~/.config/clash-service/proxy.env
 ~/.config/systemd/user/mihomo.service
+~/.config/clash-service/mihomo.pid
+~/.config/clash-service/mihomo.log
+/etc/init.d/mihomo-<当前用户名>
 ```
 
 如果设置了 `XDG_CONFIG_HOME` 或 `XDG_CACHE_HOME`，客户端会跟随这些路径。
@@ -171,6 +187,12 @@ sudo journalctl -u trojan-go.service -e --no-pager
 sudo service trojan-go status
 ```
 
+如果是 `service` 或前台模式，也可以直接看日志：
+
+```bash
+sudo tail -f /var/log/trojan-go.log
+```
+
 客户端日志：
 
 ```bash
@@ -178,7 +200,18 @@ systemctl --user status mihomo.service
 journalctl --user -u mihomo.service -e --no-pager
 ```
 
-如果当前环境没有可用的 `systemd --user`，脚本会优先退回 `service`，再不行就退回前台运行。
+如果当前环境没有可用的 `systemd --user`，脚本会优先退回 `service`，再不行就退回前台运行。`service` 模式下可用：
+
+```bash
+sudo service "mihomo-$(id -un)" status
+tail -f ~/.config/clash-service/mihomo.log
+```
+
+前台模式下也可以直接看：
+
+```bash
+tail -f ~/.config/clash-service/mihomo.log
+```
 
 如果客户端启动后检测失败，可以临时换检测地址：
 

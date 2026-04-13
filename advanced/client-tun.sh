@@ -90,6 +90,7 @@ TARGET_UID="$(id -u "$TARGET_USER")"
 CONFIG_HOME="${XDG_CONFIG_HOME:-${TARGET_HOME}/.config}"
 MIHOMO_CONFIG_FILE="${CONFIG_HOME}/mihomo/config.yaml"
 MIHOMO_BIN="${TARGET_HOME}/.local/bin/mihomo"
+SYSV_SERVICE_NAME="mihomo-$(printf '%s' "$TARGET_USER" | tr -c 'A-Za-z0-9._-' '_')"
 
 ensure_config() {
   [ -f "$MIHOMO_CONFIG_FILE" ] || die "未找到 mihomo 配置: ${MIHOMO_CONFIG_FILE}。请先运行 bash client.sh install。"
@@ -187,10 +188,25 @@ user_systemctl() {
   fi
 }
 
+service_available() {
+  command -v service >/dev/null 2>&1 && [ -f "/etc/init.d/${SYSV_SERVICE_NAME}" ]
+}
+
 restart_mihomo() {
-  command -v systemctl >/dev/null 2>&1 || return
-  user_systemctl daemon-reload || true
-  user_systemctl restart "$SERVICE_NAME" || true
+  if command -v systemctl >/dev/null 2>&1; then
+    user_systemctl daemon-reload || true
+    if user_systemctl restart "$SERVICE_NAME"; then
+      return
+    fi
+  fi
+
+  if service_available; then
+    run_root service "$SYSV_SERVICE_NAME" restart || true
+    return
+  fi
+
+  log "未检测到可自动重启的 mihomo 服务。请按你的运行方式手动重启："
+  log "  bash client.sh start"
 }
 
 enable_tun() {
