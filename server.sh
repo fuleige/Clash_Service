@@ -11,7 +11,7 @@ CERT_FILE="${CERT_DIR}/server.crt"
 KEY_FILE="${CERT_DIR}/server.key"
 SERVICE_FILE="/etc/systemd/system/trojan-go.service"
 SERVICE_NAME="trojan-go.service"
-DOWNLOAD_CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-/var/cache/clash-service}"
+CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-/var/cache/clash-service}"
 FORCE_DOWNLOAD="${CLASH_SERVICE_FORCE_DOWNLOAD:-0}"
 
 log() {
@@ -34,32 +34,29 @@ Usage:
   sudo bash server.sh uninstall
   bash server.sh help
 
-This script installs trojan-go on Ubuntu/Debian, writes a systemd service,
-and generates a self-signed TLS certificate by default.
-
-Set CLASH_SERVICE_FORCE_DOWNLOAD=1 to reinstall trojan-go even when the
-binary already exists; a cached archive may be reused.
-Set CLASH_SERVICE_CACHE_DIR=/path/to/dir to use a custom download cache.
+Env:
+  CLASH_SERVICE_CACHE_DIR=/path/to/cache
+  CLASH_SERVICE_FORCE_DOWNLOAD=1
 EOF
 }
 
-require_root() {
+need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     die "请使用 root 权限运行，例如: sudo bash server.sh $1"
   fi
 }
 
-require_apt_system() {
-  command -v apt-get >/dev/null 2>&1 || die "当前脚本默认支持 Ubuntu/Debian，需要 apt-get。"
-  command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl，无法写入 systemd 服务。"
+need_apt_system() {
+  command -v apt-get >/dev/null 2>&1 || die "当前脚本只支持 Ubuntu/Debian。"
+  command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl。"
 }
 
 install_packages() {
-  local packages=("curl" "unzip" "openssl" "ca-certificates")
+  local packages=(curl unzip openssl ca-certificates)
   local missing=()
   local pkg
 
-  require_apt_system
+  need_apt_system
 
   for pkg in "${packages[@]}"; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -68,11 +65,10 @@ install_packages() {
   done
 
   if [ "${#missing[@]}" -eq 0 ]; then
-    log "系统依赖已满足。"
     return
   fi
 
-  log "缺少依赖，自动安装: ${missing[*]}"
+  log "准备安装系统依赖: ${missing[*]}"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y "${missing[@]}"
@@ -91,29 +87,7 @@ detect_arch() {
   esac
 }
 
-find_cached_trojan_go_archive() {
-  local arch="$1"
-  local archive
-
-  [ -d "$DOWNLOAD_CACHE_DIR" ] || return 1
-
-  archive="$(find "$DOWNLOAD_CACHE_DIR" -maxdepth 1 -type f -name "trojan-go-linux-${arch}.zip" | sort -V | tail -n 1 || true)"
-  if [ -n "$archive" ]; then
-    printf '%s' "$archive"
-    return 0
-  fi
-
-  return 1
-}
-
-validate_port() {
-  local port="$1"
-  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-    die "端口号必须是 1-65535 之间的整数: ${port}"
-  fi
-}
-
-ask_with_default() {
+ask() {
   local prompt="$1"
   local default_value="$2"
   local answer=""
@@ -122,52 +96,36 @@ ask_with_default() {
     read -r -p "${prompt} [${default_value}]: " answer
   fi
 
-  if [ -z "$answer" ]; then
-    printf '%s' "$default_value"
-  else
-    printf '%s' "$answer"
+  printf '%s' "${answer:-$default_value}"
+}
+
+validate_port() {
+  local port="$1"
+
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    die "端口号必须是 1-65535 之间的整数: ${port}"
   fi
 }
 
-json_escape() {
-  local value="${1:-}"
-  value=${value//\\/\\\\}
-  value=${value//\"/\\\"}
-  value=${value//$'\b'/\\b}
-  value=${value//$'\f'/\\f}
-  value=${value//$'\n'/\\n}
-  value=${value//$'\r'/\\r}
-  value=${value//$'\t'/\\t}
-  printf '%s' "$value"
-}
-
-validate_no_control_chars() {
+validate_text() {
   local label="$1"
   local value="$2"
 
-  if [[ "$value" =~ [[:cntrl:]] ]]; then
-    die "${label} 不能包含控制字符。"
-  fi
+  [ -n "$value" ] || die "${label} 不能为空。"
+  [[ "$value" =~ [[:cntrl:]] ]] && die "${label} 不能包含控制字符。"
 }
 
 validate_sni() {
-  local value="$1"
+  local sni="$1"
 
-  validate_no_control_chars "SNI/证书名称" "$value"
-
-  if [[ "$value" == *"/"* ]]; then
-    die "SNI/证书名称不能包含 /。"
-  fi
-  if [[ "$value" == *:* ]] && ! [[ "$value" =~ ^[0-9A-Fa-f:.]+$ ]]; then
-    die "SNI/证书名称不要包含端口；如需填写 IPv6，只填写 IPv6 地址本身。"
-  fi
-  if ! [[ "$value" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    die "SNI/证书名称只能包含字母、数字、点、短横线、下划线和冒号。"
-  fi
+  validate_text "SNI/证书名称" "$sni"
+  [[ "$sni" == */* ]] && die "SNI/证书名称不能包含 /。"
+  [[ "$sni" =~ ^[A-Za-z0-9._:-]+$ ]] || die "SNI/证书名称格式不合法: ${sni}"
 }
 
 default_sni() {
-  local host=""
+  local host
+
   host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
   if [ -n "$host" ] && [ "$host" != "(none)" ]; then
     printf '%s' "$host"
@@ -180,77 +138,59 @@ random_password() {
   openssl rand -hex 16
 }
 
-backup_file_if_exists() {
+backup_if_exists() {
   local file="$1"
-  local backup_file
 
   [ -f "$file" ] || return 0
-  backup_file="${file}.bak.$(date +%Y%m%d%H%M%S)"
-  cp -a "$file" "$backup_file"
-  log "已备份已有文件: ${backup_file}"
+  cp -a "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
 }
 
-download_trojan_go() {
-  local arch
-  local url
-  local tmp_dir
-  local archive_path
-  local download_file
-  local binary_path
+note_manual_download() {
+  local url="$1"
+  local path="$2"
 
-  arch="$(detect_arch)"
-  url="https://github.com/${TROJAN_REPO}/releases/latest/download/trojan-go-linux-${arch}.zip"
-  tmp_dir="$(mktemp -d)"
-  download_file="trojan-go-linux-${arch}.zip"
-
-  mkdir -p "$DOWNLOAD_CACHE_DIR"
-  archive_path="$(find_cached_trojan_go_archive "$arch" || true)"
-
-  if [ -n "$archive_path" ]; then
-    log "检测到本地 trojan-go 压缩包，跳过下载: ${archive_path}"
-  else
-    archive_path="${DOWNLOAD_CACHE_DIR}/${download_file}"
-    log "准备下载 trojan-go (${arch}): ${url}"
-    log "网络不好时，可先手动下载该文件到: ${archive_path}"
-    log "文件名保持不变，重新运行脚本会自动检测并使用本地压缩包。"
-    if ! curl -fL "$url" -o "${tmp_dir}/${download_file}"; then
-      rm -rf "$tmp_dir"
-      die "下载 trojan-go 失败。可先手动下载到 ${archive_path} 后重试。"
-    fi
-    if ! install -m 0644 "${tmp_dir}/${download_file}" "$archive_path"; then
-      rm -rf "$tmp_dir"
-      die "保存 trojan-go 压缩包失败: ${archive_path}"
-    fi
-  fi
-
-  if ! unzip -q "$archive_path" -d "$tmp_dir"; then
-    rm -rf "$tmp_dir"
-    die "解压 trojan-go 失败: ${archive_path}"
-  fi
-
-  binary_path="$(find "$tmp_dir" -type f -name trojan-go | head -n 1 || true)"
-  if [ -z "$binary_path" ]; then
-    rm -rf "$tmp_dir"
-    die "下载包中未找到 trojan-go 二进制文件。"
-  fi
-
-  if ! install -m 0755 "$binary_path" "$TROJAN_BIN"; then
-    rm -rf "$tmp_dir"
-    die "安装 trojan-go 失败。"
-  fi
-  rm -rf "$tmp_dir"
-  log "已安装: ${TROJAN_BIN}"
+  log "准备下载: ${url##*/}"
+  log "如网络不好，可手动下载后放到: ${path}"
+  log "下载地址: ${url}"
 }
 
-install_trojan_go_if_needed() {
+install_trojan_go() {
+  local arch file url archive tmp_dir bin_file
+
   if [ -x "$TROJAN_BIN" ] && [ "$FORCE_DOWNLOAD" != "1" ]; then
-    log "检测到 trojan-go 已存在: ${TROJAN_BIN}"
+    log "复用已有 trojan-go: ${TROJAN_BIN}"
     "$TROJAN_BIN" -version 2>/dev/null | head -n 1 || true
-    log "如需强制重新下载，请设置 CLASH_SERVICE_FORCE_DOWNLOAD=1。"
     return
   fi
 
-  download_trojan_go
+  arch="$(detect_arch)"
+  file="trojan-go-linux-${arch}.zip"
+  url="https://github.com/${TROJAN_REPO}/releases/latest/download/${file}"
+  archive="${CACHE_DIR}/${file}"
+  tmp_dir="$(mktemp -d)"
+
+  mkdir -p "$CACHE_DIR"
+  if [ ! -f "$archive" ]; then
+    note_manual_download "$url" "$archive"
+    if ! curl -fL "$url" -o "$archive"; then
+      rm -rf "$tmp_dir"
+      die "下载 trojan-go 失败。你也可以手动下载 ${file} 后放到 ${archive}"
+    fi
+  else
+    log "检测到本地缓存: ${archive}"
+  fi
+
+  if ! unzip -q "$archive" -d "$tmp_dir"; then
+    rm -rf "$tmp_dir"
+    die "解压 trojan-go 失败: ${archive}"
+  fi
+
+  bin_file="$(find "$tmp_dir" -type f -name trojan-go | head -n 1 || true)"
+  [ -n "$bin_file" ] || die "压缩包中未找到 trojan-go: ${archive}"
+
+  install -m 0755 "$bin_file" "$TROJAN_BIN"
+  rm -rf "$tmp_dir"
+  log "已安装 trojan-go: ${TROJAN_BIN}"
 }
 
 generate_certificate() {
@@ -258,8 +198,8 @@ generate_certificate() {
   local san
 
   mkdir -p "$CERT_DIR"
-  backup_file_if_exists "$CERT_FILE"
-  backup_file_if_exists "$KEY_FILE"
+  backup_if_exists "$CERT_FILE"
+  backup_if_exists "$KEY_FILE"
 
   if [[ "$sni" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$sni" == *:* ]]; then
     san="IP:${sni}"
@@ -267,14 +207,12 @@ generate_certificate() {
     san="DNS:${sni}"
   fi
 
-  log "生成自签名证书: ${CERT_FILE}"
   if ! openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout "$KEY_FILE" \
     -out "$CERT_FILE" \
     -days 3650 \
     -subj "/CN=${sni}" \
     -addext "subjectAltName=${san}" >/dev/null 2>&1; then
-    log "当前 OpenSSL 不支持 -addext，回退为仅 CN 的自签名证书。"
     openssl req -x509 -newkey rsa:2048 -nodes \
       -keyout "$KEY_FILE" \
       -out "$CERT_FILE" \
@@ -284,43 +222,51 @@ generate_certificate() {
 
   chmod 600 "$KEY_FILE"
   chmod 644 "$CERT_FILE"
+  log "已生成证书: ${CERT_FILE}"
+}
+
+json_escape() {
+  local value="${1:-}"
+
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
 }
 
 write_config() {
-  local listen_port="$1"
+  local port="$1"
   local password="$2"
   local sni="$3"
-  local password_json
-  local sni_json
-
-  password_json="$(json_escape "$password")"
-  sni_json="$(json_escape "$sni")"
 
   mkdir -p "$CONFIG_DIR"
-  backup_file_if_exists "$CONFIG_FILE"
+  backup_if_exists "$CONFIG_FILE"
+
   cat > "$CONFIG_FILE" <<EOF
 {
   "run_type": "server",
   "local_addr": "0.0.0.0",
-  "local_port": ${listen_port},
+  "local_port": ${port},
   "remote_addr": "www.cloudflare.com",
   "remote_port": 80,
   "password": [
-    "${password_json}"
+    "$(json_escape "$password")"
   ],
   "ssl": {
     "cert": "${CERT_FILE}",
     "key": "${KEY_FILE}",
-    "sni": "${sni_json}"
+    "sni": "$(json_escape "$sni")"
   }
 }
 EOF
+
   chmod 600 "$CONFIG_FILE"
-  log "已写入配置: ${CONFIG_FILE}"
 }
 
-write_connection_info() {
-  local listen_port="$1"
+write_info() {
+  local port="$1"
   local password="$2"
   local sni="$3"
 
@@ -328,7 +274,7 @@ write_connection_info() {
   cat > "$INFO_FILE" <<EOF
 # Generated by server.sh. Keep this file private.
 server: <你的服务器 IP 或域名>
-port: ${listen_port}
+port: ${port}
 password: ${password}
 sni: ${sni}
 skip-cert-verify: true
@@ -336,11 +282,11 @@ config: ${CONFIG_FILE}
 cert: ${CERT_FILE}
 key: ${KEY_FILE}
 EOF
-  chmod 0600 "$INFO_FILE"
-  log "服务端连接信息已保存: ${INFO_FILE}"
+
+  chmod 600 "$INFO_FILE"
 }
 
-write_systemd_service() {
+write_service() {
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=trojan-go server
@@ -360,78 +306,64 @@ WantedBy=multi-user.target
 EOF
 
   systemctl daemon-reload
-  log "已写入 systemd 服务: ${SERVICE_FILE}"
 }
 
-server_config_complete() {
-  [ -f "$CONFIG_FILE" ] && [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]
-}
+open_firewall() {
+  local port="$1"
 
-ensure_server_runtime() {
-  install_packages
-  install_trojan_go_if_needed
-  write_systemd_service
-}
-
-open_firewall_if_present() {
-  local listen_port="$1"
-
-  if command -v ufw >/dev/null 2>&1; then
-    if ufw status 2>/dev/null | grep -qi '^Status: active'; then
-      log "检测到 ufw 已启用，自动放行 ${listen_port}/tcp。"
-      ufw allow "${listen_port}/tcp"
-    else
-      log "ufw 未启用，跳过防火墙配置。"
-    fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    log "检测到 ufw，自动放行 ${port}/tcp"
+    ufw allow "${port}/tcp"
     return
   fi
 
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    log "检测到 firewalld 已启用，自动放行 ${listen_port}/tcp。"
-    firewall-cmd --add-port="${listen_port}/tcp" --permanent
+    log "检测到 firewalld，自动放行 ${port}/tcp"
+    firewall-cmd --add-port="${port}/tcp" --permanent
     firewall-cmd --reload
-    return
   fi
+}
 
-  log "未检测到已启用的 ufw/firewalld，跳过防火墙配置。"
+server_ready() {
+  [ -x "$TROJAN_BIN" ] && [ -f "$CONFIG_FILE" ] && [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]
+}
+
+ensure_runtime() {
+  install_packages
+  install_trojan_go
+  write_service
 }
 
 install_server() {
-  local listen_port
-  local password
-  local sni
+  local port password sni
 
-  require_root install
+  need_root install
   install_packages
 
-  listen_port="$(ask_with_default "绑定端口" "443")"
-  validate_port "$listen_port"
-  password="$(ask_with_default "trojan 密码" "$(random_password)")"
-  [ -n "$password" ] || die "密码不能为空。"
-  validate_no_control_chars "trojan 密码" "$password"
-  sni="$(ask_with_default "SNI/证书名称" "$(default_sni)")"
-  [ -n "$sni" ] || die "SNI 不能为空。"
+  port="$(ask "绑定端口" "443")"
+  validate_port "$port"
+  password="$(ask "trojan 密码" "$(random_password)")"
+  validate_text "trojan 密码" "$password"
+  sni="$(ask "SNI/证书名称" "$(default_sni)")"
   validate_sni "$sni"
 
-  install_trojan_go_if_needed
+  install_trojan_go
   generate_certificate "$sni"
-  write_config "$listen_port" "$password" "$sni"
-  write_connection_info "$listen_port" "$password" "$sni"
-  write_systemd_service
-  open_firewall_if_present "$listen_port"
+  write_config "$port" "$password" "$sni"
+  write_info "$port" "$password" "$sni"
+  write_service
+  open_firewall "$port"
 
-  systemctl enable "$SERVICE_NAME"
-  systemctl restart "$SERVICE_NAME"
+  systemctl enable --now "$SERVICE_NAME"
 
   cat <<EOF
 
 安装完成。
 服务端连接信息:
   server: <你的服务器 IP 或域名>
-  port: ${listen_port}
+  port: ${port}
   password: ${password}
   sni: ${sni}
-  skip-cert-verify: true
   saved: ${INFO_FILE}
 
 查看状态:
@@ -439,44 +371,30 @@ install_server() {
 EOF
 }
 
-start_server() {
-  require_root start
+start_or_restart() {
+  local action="$1"
 
-  if ! server_config_complete; then
-    log "未检测到完整服务端安装，进入一键安装流程。"
+  need_root "$action"
+  if ! server_ready; then
+    log "未检测到完整安装，进入安装流程。"
     install_server
     return
   fi
 
-  ensure_server_runtime
+  ensure_runtime
   systemctl enable "$SERVICE_NAME"
-  systemctl start "$SERVICE_NAME"
-}
-
-restart_server() {
-  require_root restart
-
-  if ! server_config_complete; then
-    log "未检测到完整服务端安装，进入一键安装流程。"
-    install_server
-    return
-  fi
-
-  ensure_server_runtime
-  systemctl enable "$SERVICE_NAME"
-  systemctl restart "$SERVICE_NAME"
+  systemctl "$action" "$SERVICE_NAME"
 }
 
 uninstall_server() {
-  require_root uninstall
+  local answer=""
 
+  need_root uninstall
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-  rm -f "$SERVICE_FILE"
+  rm -f "$SERVICE_FILE" "$TROJAN_BIN"
   systemctl daemon-reload
   systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
-
-  rm -f "$TROJAN_BIN"
 
   if [ -t 0 ]; then
     read -r -p "是否删除 ${CONFIG_DIR} 下的配置和证书? [y/N]: " answer
@@ -487,26 +405,23 @@ uninstall_server() {
   else
     log "保留配置目录: ${CONFIG_DIR}"
   fi
-
-  log "卸载完成。"
 }
 
-systemctl_action() {
+service_cmd() {
   local action="$1"
-  require_root "$action"
-  require_apt_system
+
+  need_root "$action"
+  need_apt_system
   systemctl "$action" "$SERVICE_NAME"
 }
 
 main() {
-  local command="${1:-help}"
-
-  case "$command" in
+  case "${1:-help}" in
     install) install_server ;;
-    start) start_server ;;
-    stop) systemctl_action stop ;;
-    restart) restart_server ;;
-    status) systemctl_action status ;;
+    start) start_or_restart start ;;
+    stop) service_cmd stop ;;
+    restart) start_or_restart restart ;;
+    status) service_cmd status ;;
     uninstall) uninstall_server ;;
     help | -h | --help) usage ;;
     *) usage; exit 1 ;;
