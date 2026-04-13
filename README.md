@@ -101,6 +101,10 @@ http://127.0.0.1:7890
 ~/.config/clash-service/client-info.txt
 ```
 
+后续再次执行 `bash client.sh install` 时，会默认从这个文件读取 `server`、`port`、`password`、`sni` 作为输入默认值。
+
+如果本地 `mihomo` 配置文件丢失，但这个连接信息文件还在，`bash client.sh start` 和 `bash client.sh restart` 会优先尝试根据它自动恢复配置，而不是重新让你输入一遍。
+
 代理环境变量会写到：
 
 ```text

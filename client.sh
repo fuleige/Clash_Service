@@ -640,6 +640,45 @@ EOF
   chmod 600 "$CLIENT_INFO_FILE"
 }
 
+announce_client_info_source() {
+  log "默认读取连接信息文件: ${CLIENT_INFO_FILE}"
+  if [ -f "$CLIENT_INFO_FILE" ]; then
+    log "检测到已有连接信息，将优先使用该文件中的值。"
+  else
+    log "未检测到已有连接信息，首次安装后会写入该文件。"
+  fi
+}
+
+read_saved_client_field() {
+  local field="$1"
+
+  [ -f "$CLIENT_INFO_FILE" ] || return 0
+  sed -n "s/^${field}:[[:space:]]*//p" "$CLIENT_INFO_FILE" | head -n 1
+}
+
+restore_client_config_from_saved_info() {
+  local server_addr server_port password sni
+
+  [ -f "$CLIENT_INFO_FILE" ] || return 1
+
+  announce_client_info_source
+  server_addr="$(read_saved_client_field server)"
+  server_port="$(read_saved_client_field port)"
+  password="$(read_saved_client_field password)"
+  sni="$(read_saved_client_field sni)"
+
+  [ -n "$server_addr" ] || die "已保存连接信息文件缺少 server: ${CLIENT_INFO_FILE}"
+  [ -n "$server_port" ] || die "已保存连接信息文件缺少 port: ${CLIENT_INFO_FILE}"
+  [ -n "$password" ] || die "已保存连接信息文件缺少 password: ${CLIENT_INFO_FILE}"
+  [ -n "$sni" ] || die "已保存连接信息文件缺少 sni: ${CLIENT_INFO_FILE}"
+  validate_port "$server_port"
+
+  log "正在根据保存的连接信息重新生成客户端配置。"
+  write_mihomo_config "$server_addr" "$server_port" "$password" "$sni"
+  write_client_info "$server_addr" "$server_port" "$password" "$sni"
+  return 0
+}
+
 write_systemd_service() {
   mkdir -p "$SYSTEMD_USER_DIR"
   cat > "$SYSTEMD_SERVICE_FILE" <<EOF
@@ -1075,17 +1114,29 @@ EOF
 
 install_client() {
   local server_addr server_port password sni mode
+  local server_addr_default server_port_default password_default sni_default
 
   need_user
   mode="$(client_service_mode)"
+  announce_client_info_source
 
-  server_addr="$(ask "服务端地址/IP" "127.0.0.1")"
+  server_addr_default="$(read_saved_client_field server)"
+  server_port_default="$(read_saved_client_field port)"
+  password_default="$(read_saved_client_field password)"
+  sni_default="$(read_saved_client_field sni)"
+
+  [ -n "$server_addr_default" ] || server_addr_default="127.0.0.1"
+  [ -n "$server_port_default" ] || server_port_default="443"
+  [ -n "$password_default" ] || password_default="change-me"
+  [ -n "$sni_default" ] || sni_default="$server_addr_default"
+
+  server_addr="$(ask "服务端地址/IP" "$server_addr_default")"
   [ -n "$server_addr" ] || die "服务端地址不能为空。"
-  server_port="$(ask "服务端端口" "443")"
+  server_port="$(ask "服务端端口" "$server_port_default")"
   validate_port "$server_port"
-  password="$(ask "trojan 密码" "change-me")"
+  password="$(ask "trojan 密码" "$password_default")"
   [ -n "$password" ] || die "密码不能为空。"
-  sni="$(ask "SNI" "$server_addr")"
+  sni="$(ask "SNI" "$sni_default")"
   [ -n "$sni" ] || die "SNI 不能为空。"
 
   install_mihomo
@@ -1115,9 +1166,13 @@ EOF
 start_client() {
   need_user
   if ! client_ready; then
-    log "未检测到 mihomo 配置，进入安装流程。"
-    install_client
-    return
+    if restore_client_config_from_saved_info; then
+      log "未检测到 mihomo 配置，已根据保存的连接信息重新生成。"
+    else
+      log "未检测到 mihomo 配置，进入安装流程。"
+      install_client
+      return
+    fi
   fi
 
   ensure_runtime
@@ -1201,6 +1256,15 @@ main() {
     stop) stop_client ;;
     restart)
       need_user
+      if ! client_ready; then
+        if restore_client_config_from_saved_info; then
+          log "未检测到 mihomo 配置，已根据保存的连接信息重新生成。"
+        else
+          log "未检测到 mihomo 配置，进入安装流程。"
+          install_client
+          return
+        fi
+      fi
       ensure_runtime
       if [ "$(client_service_mode)" = "foreground" ]; then
         restart_service
