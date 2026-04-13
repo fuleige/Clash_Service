@@ -21,7 +21,7 @@ LOG_FILE="${STATE_DIR}/mihomo.log"
 CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-${CACHE_HOME}/clash-service}"
 FORCE_DOWNLOAD="${CLASH_SERVICE_FORCE_DOWNLOAD:-0}"
 SKIP_CONNECTIVITY_CHECK="${CLASH_SERVICE_SKIP_CHECK:-0}"
-CONNECTIVITY_TEST_URL="${CLASH_SERVICE_CHECK_URL:-https://www.gstatic.com/generate_204}"
+CONNECTIVITY_TEST_URL="${CLASH_SERVICE_CHECK_URL:-}"
 CONNECTIVITY_TIMEOUT_MS="${CLASH_SERVICE_CHECK_TIMEOUT_MS:-8000}"
 CONNECTIVITY_CURL_TIMEOUT="${CLASH_SERVICE_CHECK_CURL_TIMEOUT:-12}"
 MIHOMO_CONTROLLER_URL="${CLASH_SERVICE_CONTROLLER_URL:-http://127.0.0.1:9090}"
@@ -206,10 +206,12 @@ PY
 }
 
 build_delay_url() {
+  local test_url="$1"
+
   if command -v python3 >/dev/null 2>&1; then
     DELAY_BASE="${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
       DELAY_TIMEOUT="$CONNECTIVITY_TIMEOUT_MS" \
-      DELAY_TEST_URL="$CONNECTIVITY_TEST_URL" \
+      DELAY_TEST_URL="$test_url" \
       python3 - <<'PY'
 import os
 import urllib.parse
@@ -228,7 +230,21 @@ PY
     "$MIHOMO_CONTROLLER_URL" \
     "$MIHOMO_PROXY_NAME" \
     "$CONNECTIVITY_TIMEOUT_MS" \
-    "$CONNECTIVITY_TEST_URL"
+    "$test_url"
+}
+
+connectivity_test_urls() {
+  if [ -n "$CONNECTIVITY_TEST_URL" ]; then
+    printf '%s\n' "$CONNECTIVITY_TEST_URL"
+    return
+  fi
+
+  cat <<'EOF'
+https://www.cloudflare.com/cdn-cgi/trace
+http://cp.cloudflare.com/generate_204
+https://www.gstatic.com/generate_204
+http://www.msftconnecttest.com/connecttest.txt
+EOF
 }
 
 systemd_running() {
@@ -959,20 +975,34 @@ wait_controller() {
 }
 
 delay_request() {
+  local test_url="$1"
+
   if command -v curl >/dev/null 2>&1; then
     env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
       curl -fsS --noproxy '*' --max-time "$CONNECTIVITY_CURL_TIMEOUT" \
       -G "${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
       --data-urlencode "timeout=${CONNECTIVITY_TIMEOUT_MS}" \
-      --data-urlencode "url=${CONNECTIVITY_TEST_URL}"
+      --data-urlencode "url=${test_url}"
     return
   fi
 
-  http_get "$(build_delay_url)" "$CONNECTIVITY_CURL_TIMEOUT" 1
+  http_get "$(build_delay_url "$test_url")" "$CONNECTIVITY_CURL_TIMEOUT" 1
+}
+
+proxy_probe() {
+  local test_url="$1"
+  local local_proxy_port
+
+  command -v curl >/dev/null 2>&1 || return 1
+  local_proxy_port="$(current_local_proxy_port)"
+
+  env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    curl -fsS --proxy "http://127.0.0.1:${local_proxy_port}" --max-time "$CONNECTIVITY_CURL_TIMEOUT" \
+    "$test_url" >/dev/null
 }
 
 check_proxy_connectivity() {
-  local response=""
+  local response="" test_url="" attempted="0"
 
   if [ "$SKIP_CONNECTIVITY_CHECK" = "1" ]; then
     log "已跳过代理连通性检测。"
@@ -988,15 +1018,27 @@ check_proxy_connectivity() {
     die "mihomo 已启动，但本地 controller 不可访问。请查看日志。"
   fi
 
-  log "检测代理节点: ${MIHOMO_PROXY_NAME} -> ${CONNECTIVITY_TEST_URL}"
-  if response="$(delay_request 2>/dev/null)" &&
-    printf '%s' "$response" | grep -Eq '"delay"[[:space:]]*:[[:space:]]*[0-9]+'; then
-    log "代理连通性检测通过: ${response}"
-    return
-  fi
+  while IFS= read -r test_url; do
+    [ -n "$test_url" ] || continue
+    attempted="1"
 
-  write_proxy_disabled_env
-  die "mihomo 已启动，但代理节点连通性检测失败。请核对服务端地址、端口、密码、SNI、防火墙；如确认只是测试 URL 不通，可设置 CLASH_SERVICE_CHECK_URL 或 CLASH_SERVICE_SKIP_CHECK=1。"
+    log "检测代理节点: ${MIHOMO_PROXY_NAME} -> ${test_url}"
+    if response="$(delay_request "$test_url" 2>/dev/null)" &&
+      printf '%s' "$response" | grep -Eq '"delay"[[:space:]]*:[[:space:]]*[0-9]+'; then
+      log "代理连通性检测通过(controller delay): ${response}"
+      return
+    fi
+
+    if proxy_probe "$test_url" 2>/dev/null; then
+      log "代理连通性检测通过(local proxy fetch): ${test_url}"
+      return
+    fi
+  done <<< "$(connectivity_test_urls)"
+
+  [ "$attempted" = "1" ] || die "未配置任何可用的代理检测地址。"
+  log "代理节点连通性检测未通过，但已保留当前运行中的 mihomo。"
+  log "这通常表示默认检测 URL 不适合当前网络，并不一定代表节点不可用。"
+  log "如需指定检测地址，可设置 CLASH_SERVICE_CHECK_URL；如确认代理可用，也可忽略此提示。"
 }
 
 client_ready() {
