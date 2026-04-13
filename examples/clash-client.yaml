@@ -1,0 +1,43 @@
+# Example Clash config for GUI clients such as Clash for Windows,
+# Clash Verge, Mihomo Party, OpenClash, etc.
+#
+# Replace these 4 values before importing:
+#   server   -> your server IP or domain
+#   port     -> the port configured by server.sh
+#   password -> the Trojan password configured by server.sh
+#   sni      -> the SNI / certificate name configured by server.sh
+#
+# This example keeps `skip-cert-verify: true` because server.sh
+# generates a self-signed certificate by default.
+
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+
+proxies:
+  - name: trojan-service
+    type: trojan
+    server: "YOUR_SERVER_IP_OR_DOMAIN"
+    port: 443
+    password: "YOUR_TROJAN_PASSWORD"
+    sni: "YOUR_SNI_OR_DOMAIN"
+    skip-cert-verify: true
+    udp: true
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - trojan-service
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - MATCH,PROXY
