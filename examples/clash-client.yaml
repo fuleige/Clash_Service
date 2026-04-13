@@ -11,7 +11,6 @@
 # generates a self-signed certificate by default.
 
 port: 7890
-socks-port: 7891
 allow-lan: false
 mode: rule
 log-level: info

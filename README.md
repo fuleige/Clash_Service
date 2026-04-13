@@ -2,6 +2,16 @@
 
 用两个脚本快速搭一个基于 `trojan-go` + `mihomo` 的简单代理服务。
 
+<details>
+<summary>点击查看：trojan-go 和 mihomo 是什么</summary>
+
+- `trojan-go`
+  服务端实际运行的 Trojan 协议程序。这个仓库里主要用它在服务器上接收客户端连接。
+- `mihomo`
+  本地客户端核心，兼容 Clash 配置格式。这个仓库里主要用它在本机启动代理端口、连接 `trojan-go`，并给终端程序提供本地代理入口。
+
+</details>
+
 - `server.sh`
   服务端安装脚本。负责下载 `trojan-go`、生成自签名证书、写入配置，并根据环境选择 `systemd`、`service` 或前台运行。
 - `client.sh`
@@ -66,11 +76,66 @@ sudo bash server.sh uninstall
 bash client.sh install
 ```
 
+这个安装流程主要会做 4 件事：
+
+- 下载或复用 `mihomo`
+- 根据你输入的服务端地址、端口、密码、SNI，生成 `~/.config/mihomo/config.yaml`
+- 在可用的后台服务管理器环境中自动启动本地 `mihomo`，并连接到服务端的 `trojan-service`
+- 为后续新终端写入代理环境变量加载逻辑
+
+最重要的本地代理入口是：
+
+- `127.0.0.1:7890`
+
+这是 `mihomo` 的本地 HTTP 代理端口。终端代理环境变量会默认指向它。大多数命令行程序只要读取了代理环境变量，就会通过这个端口走 HTTP/HTTPS 代理。
+
+如果你要手动给程序填代理地址，通常也优先填：
+
+```text
+http://127.0.0.1:7890
+```
+
 安装完成后，连接信息会保存到：
 
 ```text
 ~/.config/clash-service/client-info.txt
 ```
+
+代理环境变量会写到：
+
+```text
+~/.config/clash-service/proxy.env
+```
+
+新开的终端会自动加载这个文件，因此会自动写入这些环境变量：
+
+- `http_proxy=http://127.0.0.1:7890`
+- `https_proxy=http://127.0.0.1:7890`
+- `HTTP_PROXY=$http_proxy`
+- `HTTPS_PROXY=$https_proxy`
+
+也就是说，后续新终端里大多数支持标准 HTTP/HTTPS 代理环境变量的程序都会直接走本地 `mihomo` 代理。
+
+<details>
+<summary>点击查看：controller 和本地 DNS 是什么</summary>
+
+`client.sh` 生成的 `mihomo` 配置里，除了本地代理端口，还会启用两个本地监听地址：
+
+- `127.0.0.1:9090`
+  这是 `mihomo` 自己的本地管理接口，也就是 controller。它不是拿来给业务流量走代理的，而是给脚本或管理工具查询状态、读取节点信息、做 delay 检测用的。
+- `127.0.0.1:1053`
+  这是 `mihomo` 自己启动的本地 DNS 监听地址。
+
+这两个端口都是 `mihomo` 进程自己提供的，不是系统额外安装的独立服务。
+
+需要注意：
+
+- controller 默认只监听本机，不对外开放
+- 本地 DNS 虽然会跟着 `mihomo` 一起启动，但当前脚本默认不会自动修改系统 `resolv.conf`
+- 所以默认真正“自动生效”的是代理环境变量，不是系统级 DNS 接管
+- 如果以后启用 TUN 或手动改系统 DNS，`127.0.0.1:1053` 的作用才会更直接
+
+</details>
 
 之后在新开的终端里使用：
 
@@ -92,6 +157,14 @@ bash client.sh enable
 bash client.sh disable
 bash client.sh uninstall
 ```
+
+补充说明：
+
+- 如果你直接执行 `bash client.sh install` 或 `bash client.sh start`，当前这个终端不会被脚本反向改写；新开的终端会自动读取 `proxy.env`
+- 如果想让当前终端立刻生效，可以手动执行 `source ~/.config/clash-service/proxy.env`
+- 如果使用的是 `clash_service start` / `clash_service stop` 这个 shell 函数，当前终端也会同步更新代理环境变量
+- `stop` 或 `disable` 会把后续新终端中的代理环境变量一起清掉
+- 如果当前环境没有可用的后台服务管理器，`install` 会先写好配置，等你执行 `bash client.sh start` 后再以前台方式运行
 
 如果当前环境既没有可用的 `systemd --user`，也没有可用的 `service`，`start` 和 `restart` 会直接前台运行 `mihomo`。这时要把它放在一个专门终端里运行，并保持该终端不要关闭。
 
