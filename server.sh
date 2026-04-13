@@ -230,16 +230,29 @@ validate_text() {
   local label="$1"
   local value="$2"
 
-  [ -n "$value" ] || die "${label} 不能为空。"
-  [[ "$value" =~ [[:cntrl:]] ]] && die "${label} 不能包含控制字符。"
+  if [ -z "$value" ]; then
+    die "${label} 不能为空。"
+  fi
+
+  if [[ "$value" =~ [[:cntrl:]] ]]; then
+    die "${label} 不能包含控制字符。"
+  fi
+
+  return 0
 }
 
 validate_sni() {
   local sni="$1"
 
   validate_text "SNI/证书名称" "$sni"
-  [[ "$sni" == */* ]] && die "SNI/证书名称不能包含 /。"
-  [[ "$sni" =~ ^[A-Za-z0-9._:-]+$ ]] || die "SNI/证书名称格式不合法: ${sni}"
+
+  if [[ "$sni" == */* ]]; then
+    die "SNI/证书名称不能包含 /。"
+  fi
+
+  if ! [[ "$sni" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    die "SNI/证书名称格式不合法: ${sni}"
+  fi
 }
 
 default_sni() {
