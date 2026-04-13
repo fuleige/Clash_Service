@@ -87,7 +87,11 @@ target_home() {
 TARGET_USER="$(target_user)"
 TARGET_HOME="$(target_home "$TARGET_USER")"
 TARGET_UID="$(id -u "$TARGET_USER")"
-CONFIG_HOME="${XDG_CONFIG_HOME:-${TARGET_HOME}/.config}"
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  CONFIG_HOME="${TARGET_HOME}/.config"
+else
+  CONFIG_HOME="${XDG_CONFIG_HOME:-${TARGET_HOME}/.config}"
+fi
 MIHOMO_CONFIG_FILE="${CONFIG_HOME}/mihomo/config.yaml"
 MIHOMO_BIN="${TARGET_HOME}/.local/bin/mihomo"
 SYSV_SERVICE_NAME="mihomo-$(printf '%s' "$TARGET_USER" | tr -c 'A-Za-z0-9._-' '_')"
@@ -132,7 +136,7 @@ set_tun_enabled() {
   local tmp_file
 
   ensure_tun_block
-  tmp_file="$(mktemp)"
+  tmp_file="$(mktemp "${MIHOMO_CONFIG_FILE}.tmp.XXXXXX")"
   awk -v value="$value" '
     BEGIN { in_tun = 0; changed = 0 }
     /^tun:[[:space:]]*$/ { in_tun = 1; print; next }
@@ -146,8 +150,7 @@ set_tun_enabled() {
     END { if (in_tun && !changed) print "  enable: " value }
   ' "$MIHOMO_CONFIG_FILE" > "$tmp_file"
 
-  cat "$tmp_file" > "$MIHOMO_CONFIG_FILE"
-  rm -f "$tmp_file"
+  mv "$tmp_file" "$MIHOMO_CONFIG_FILE"
   if [ "$(id -u)" -eq 0 ]; then
     chown "$TARGET_USER:$TARGET_USER" "$MIHOMO_CONFIG_FILE"
   fi
@@ -162,13 +165,43 @@ ensure_setcap() {
   install_packages libcap2-bin || install_packages libcap || die "未找到 setcap，且自动安装失败。请手动安装包含 setcap 的 libcap 包。"
 }
 
+ensure_tun_device() {
+  if [ -c /dev/net/tun ]; then
+    return
+  fi
+
+  log "未发现 /dev/net/tun，尝试自动准备 TUN 设备。"
+
+  if command -v modprobe >/dev/null 2>&1; then
+    run_root modprobe tun || true
+  else
+    log "未找到 modprobe，继续尝试直接创建设备节点。"
+  fi
+
+  if [ ! -e /dev/net ]; then
+    run_root mkdir -p /dev/net || true
+  fi
+
+  if [ ! -e /dev/net/tun ] && command -v mknod >/dev/null 2>&1; then
+    run_root mknod /dev/net/tun c 10 200 || true
+  fi
+
+  if [ -e /dev/net/tun ] && [ ! -c /dev/net/tun ]; then
+    die "/dev/net/tun 已存在但不是字符设备，请手动检查。"
+  fi
+
+  if [ -c /dev/net/tun ]; then
+    run_root chmod 0666 /dev/net/tun || true
+    return
+  fi
+
+  die "未能准备 /dev/net/tun。请确认内核支持 TUN，或手动执行 modprobe tun 后重试。"
+}
+
 grant_capability() {
   ensure_setcap
-  if [ "$(id -u)" -eq 0 ]; then
-    setcap cap_net_admin,cap_net_bind_service+ep "$MIHOMO_BIN"
-  else
-    sudo setcap cap_net_admin,cap_net_bind_service+ep "$MIHOMO_BIN"
-  fi
+  run_root setcap cap_net_admin,cap_net_bind_service+ep "$MIHOMO_BIN" ||
+    die "为 mihomo 授权失败。请确认当前用户可使用 sudo，或直接以 root 执行。"
   log "已为 mihomo 授权 cap_net_admin,cap_net_bind_service。"
 }
 
@@ -185,6 +218,7 @@ user_systemctl() {
       systemctl --user "$@"
   else
     log "未找到 ${TARGET_USER} 的 user systemd bus，请手动执行: systemctl --user restart ${SERVICE_NAME}"
+    return 1
   fi
 }
 
@@ -210,17 +244,7 @@ restart_mihomo() {
 }
 
 enable_tun() {
-  if [ ! -e /dev/net/tun ]; then
-    log "未发现 /dev/net/tun，尝试加载 tun 模块。"
-    if command -v modprobe >/dev/null 2>&1; then
-      if [ "$(id -u)" -eq 0 ]; then
-        modprobe tun || true
-      else
-        sudo modprobe tun || true
-      fi
-    fi
-  fi
-
+  ensure_tun_device
   backup_config
   set_tun_enabled true
   grant_capability
@@ -238,7 +262,14 @@ status_tun() {
   printf 'Target user: %s\n' "$TARGET_USER"
   printf 'Config: %s\n' "$MIHOMO_CONFIG_FILE"
   printf 'Binary: %s\n\n' "$MIHOMO_BIN"
-  sed -n '/^tun:[[:space:]]*$/,/^[^[:space:]#][^:]*:[[:space:]]*/p' "$MIHOMO_CONFIG_FILE"
+  awk '
+    /^tun:[[:space:]]*$/ { in_tun = 1 }
+    in_tun {
+      if (printed && /^[^[:space:]#][^:]*:[[:space:]]*/) exit
+      print
+      printed = 1
+    }
+  ' "$MIHOMO_CONFIG_FILE"
 }
 
 main() {
