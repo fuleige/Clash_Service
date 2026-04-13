@@ -241,6 +241,7 @@ connectivity_test_urls() {
 
   cat <<'EOF'
 https://www.cloudflare.com/cdn-cgi/trace
+https://www.google.com
 http://cp.cloudflare.com/generate_204
 https://www.gstatic.com/generate_204
 http://www.msftconnecttest.com/connecttest.txt
@@ -1042,6 +1043,8 @@ proxy_probe() {
 
 check_proxy_connectivity() {
   local response="" test_url="" attempted="0"
+  local delay_output="" proxy_output=""
+  local local_proxy_port
 
   if [ "$SKIP_CONNECTIVITY_CHECK" = "1" ]; then
     log "已跳过代理连通性检测。"
@@ -1050,27 +1053,45 @@ check_proxy_connectivity() {
 
   validate_positive_int "CLASH_SERVICE_CHECK_TIMEOUT_MS" "$CONNECTIVITY_TIMEOUT_MS"
   validate_positive_int "CLASH_SERVICE_CHECK_CURL_TIMEOUT" "$CONNECTIVITY_CURL_TIMEOUT"
+  local_proxy_port="$(current_local_proxy_port)"
 
   log "等待 mihomo controller: ${MIHOMO_CONTROLLER_URL}"
   if ! wait_controller; then
     write_proxy_disabled_env
     die "mihomo 已启动，但本地 controller 不可访问。请查看日志。"
   fi
+  log "本地代理入口: http://127.0.0.1:${local_proxy_port}"
 
   while IFS= read -r test_url; do
     [ -n "$test_url" ] || continue
     attempted="1"
 
     log "检测代理节点: ${MIHOMO_PROXY_NAME} -> ${test_url}"
-    if response="$(delay_request "$test_url" 2>/dev/null)" &&
+
+    if delay_output="$(delay_request "$test_url" 2>&1)"; then
+      response="$delay_output"
+    else
+      response="$delay_output"
+    fi
+    if [ -n "$response" ] &&
       printf '%s' "$response" | grep -Eq '"delay"[[:space:]]*:[[:space:]]*[0-9]+'; then
       log "代理连通性检测通过(controller delay): ${response}"
       return
     fi
+    if [ -n "$response" ]; then
+      log "controller delay 失败: ${response}"
+    else
+      log "controller delay 失败: 无返回结果"
+    fi
 
-    if proxy_probe "$test_url" 2>/dev/null; then
+    if proxy_output="$(proxy_probe "$test_url" 2>&1)"; then
       log "代理连通性检测通过(local proxy fetch): ${test_url}"
       return
+    fi
+    if [ -n "$proxy_output" ]; then
+      log "local proxy fetch 失败: ${proxy_output}"
+    else
+      log "local proxy fetch 失败: 无返回结果"
     fi
   done <<< "$(connectivity_test_urls)"
 
