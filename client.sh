@@ -2,7 +2,6 @@
 set -Eeuo pipefail
 
 MIHOMO_REPO="MetaCubeX/mihomo"
-SERVICE_NAME="mihomo.service"
 GEOIP_URL="https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
@@ -13,10 +12,12 @@ MIHOMO_CONFIG_DIR="${CONFIG_HOME}/mihomo"
 MIHOMO_CONFIG_FILE="${MIHOMO_CONFIG_DIR}/config.yaml"
 GEOIP_FILE="${MIHOMO_CONFIG_DIR}/geoip.metadb"
 SYSTEMD_USER_DIR="${CONFIG_HOME}/systemd/user"
-SERVICE_FILE="${SYSTEMD_USER_DIR}/${SERVICE_NAME}"
+SYSTEMD_SERVICE_FILE="${SYSTEMD_USER_DIR}/mihomo.service"
 STATE_DIR="${CONFIG_HOME}/clash-service"
 PROXY_ENV_FILE="${STATE_DIR}/proxy.env"
 CLIENT_INFO_FILE="${STATE_DIR}/client-info.txt"
+PID_FILE="${STATE_DIR}/mihomo.pid"
+LOG_FILE="${STATE_DIR}/mihomo.log"
 CACHE_DIR="${CLASH_SERVICE_CACHE_DIR:-${CACHE_HOME}/clash-service}"
 FORCE_DOWNLOAD="${CLASH_SERVICE_FORCE_DOWNLOAD:-0}"
 SKIP_CONNECTIVITY_CHECK="${CLASH_SERVICE_SKIP_CHECK:-0}"
@@ -25,7 +26,6 @@ CONNECTIVITY_TIMEOUT_MS="${CLASH_SERVICE_CHECK_TIMEOUT_MS:-8000}"
 CONNECTIVITY_CURL_TIMEOUT="${CLASH_SERVICE_CHECK_CURL_TIMEOUT:-12}"
 MIHOMO_CONTROLLER_URL="${CLASH_SERVICE_CONTROLLER_URL:-http://127.0.0.1:9090}"
 MIHOMO_PROXY_NAME="${CLASH_SERVICE_PROXY_NAME:-trojan-service}"
-
 DEFAULT_LOCAL_PROXY_PORT="7890"
 RC_MARKER_BEGIN="# >>> clash-service proxy env >>>"
 RC_MARKER_END="# <<< clash-service proxy env <<<"
@@ -71,6 +71,222 @@ need_user() {
   fi
 }
 
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo "$@"
+}
+
+pkg_manager() {
+  local manager
+
+  for manager in apt-get dnf yum zypper apk; do
+    if command -v "$manager" >/dev/null 2>&1; then
+      printf '%s' "$manager"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+install_packages() {
+  local manager
+
+  [ "$#" -gt 0 ] || return 0
+  manager="$(pkg_manager || true)"
+  [ -n "$manager" ] || return 1
+
+  case "$manager" in
+    apt-get)
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get update
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+      ;;
+    dnf)
+      run_root dnf install -y "$@"
+      ;;
+    yum)
+      run_root yum install -y "$@"
+      ;;
+    zypper)
+      run_root zypper --non-interactive install "$@"
+      ;;
+    apk)
+      run_root apk add --no-cache "$@"
+      ;;
+  esac
+}
+
+ensure_download_tool() {
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+    return
+  fi
+
+  log "未找到 curl/wget/python3，尝试自动安装 curl。"
+  install_packages curl ca-certificates || die "未找到 curl/wget/python3，且自动安装失败。"
+}
+
+ensure_http_client() {
+  if command -v curl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+    return
+  fi
+
+  log "未找到 curl/python3，尝试自动安装 curl。"
+  install_packages curl ca-certificates || true
+  if command -v curl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+    return
+  fi
+
+  die "未找到 curl 或 python3，无法执行本地连通性检测。"
+}
+
+download_file() {
+  local url="$1"
+  local output="$2"
+
+  ensure_download_tool
+  mkdir -p "$(dirname "$output")"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL "$url" -o "$output"
+    return
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -O "$output" "$url"
+    return
+  fi
+
+  DOWNLOAD_URL="$url" DOWNLOAD_OUTPUT="$output" python3 - <<'PY'
+import os
+import urllib.request
+
+url = os.environ["DOWNLOAD_URL"]
+output = os.environ["DOWNLOAD_OUTPUT"]
+with urllib.request.urlopen(url, timeout=60) as response, open(output, "wb") as fh:
+    fh.write(response.read())
+PY
+}
+
+http_get() {
+  local url="$1"
+  local timeout="$2"
+  local no_proxy="${3:-0}"
+
+  ensure_http_client
+
+  if command -v curl >/dev/null 2>&1; then
+    if [ "$no_proxy" = "1" ]; then
+      env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+        curl -fsS --noproxy '*' --max-time "$timeout" "$url"
+    else
+      curl -fsS --max-time "$timeout" "$url"
+    fi
+    return
+  fi
+
+  HTTP_GET_URL="$url" HTTP_GET_TIMEOUT="$timeout" HTTP_GET_NO_PROXY="$no_proxy" python3 - <<'PY'
+import os
+import urllib.request
+
+url = os.environ["HTTP_GET_URL"]
+timeout = float(os.environ["HTTP_GET_TIMEOUT"])
+handlers = []
+if os.environ.get("HTTP_GET_NO_PROXY") == "1":
+    handlers.append(urllib.request.ProxyHandler({}))
+opener = urllib.request.build_opener(*handlers)
+request = urllib.request.Request(url, headers={"User-Agent": "clash-service"})
+with opener.open(request, timeout=timeout) as response:
+    print(response.read().decode("utf-8", "replace"))
+PY
+}
+
+build_delay_url() {
+  if command -v python3 >/dev/null 2>&1; then
+    DELAY_BASE="${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
+      DELAY_TIMEOUT="$CONNECTIVITY_TIMEOUT_MS" \
+      DELAY_TEST_URL="$CONNECTIVITY_TEST_URL" \
+      python3 - <<'PY'
+import os
+import urllib.parse
+
+base = os.environ["DELAY_BASE"]
+query = urllib.parse.urlencode({
+    "timeout": os.environ["DELAY_TIMEOUT"],
+    "url": os.environ["DELAY_TEST_URL"],
+})
+print(f"{base}?{query}")
+PY
+    return
+  fi
+
+  printf '%s/proxies/%s/delay?timeout=%s&url=%s' \
+    "$MIHOMO_CONTROLLER_URL" \
+    "$MIHOMO_PROXY_NAME" \
+    "$CONNECTIVITY_TIMEOUT_MS" \
+    "$CONNECTIVITY_TEST_URL"
+}
+
+systemd_running() {
+  [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]')" = "systemd" ] &&
+    command -v systemctl >/dev/null 2>&1
+}
+
+service_available() {
+  command -v service >/dev/null 2>&1 && [ -d /etc/init.d ]
+}
+
+user_bus_ready() {
+  command -v systemctl >/dev/null 2>&1 &&
+    systemctl --user show-environment >/dev/null 2>&1
+}
+
+enable_linger_if_possible() {
+  local current_user
+
+  systemd_running || return
+  command -v loginctl >/dev/null 2>&1 || return
+  command -v sudo >/dev/null 2>&1 || return
+
+  current_user="$(id -un)"
+  if loginctl show-user "$current_user" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+    return
+  fi
+
+  log "尝试启用 systemd linger。"
+  sudo loginctl enable-linger "$current_user" || true
+}
+
+client_service_name() {
+  printf 'mihomo-%s' "$(id -un | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+client_service_mode() {
+  if systemd_running; then
+    if user_bus_ready; then
+      printf 'systemd-user'
+      return
+    fi
+
+    enable_linger_if_possible
+    if user_bus_ready; then
+      printf 'systemd-user'
+      return
+    fi
+  fi
+
+  if service_available && command -v sudo >/dev/null 2>&1; then
+    printf 'sysv'
+    return
+  fi
+
+  printf 'foreground'
+}
+
 ask() {
   local prompt="$1"
   local default_value="$2"
@@ -98,67 +314,6 @@ validate_positive_int() {
   if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
     die "${label} 必须是正整数: ${value}"
   fi
-}
-
-install_packages() {
-  local packages=(curl gzip ca-certificates)
-  local missing=()
-  local pkg
-
-  for pkg in "${packages[@]}"; do
-    if command -v dpkg >/dev/null 2>&1; then
-      dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
-    else
-      command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
-    fi
-  done
-
-  if [ "${#missing[@]}" -eq 0 ]; then
-    return
-  fi
-
-  command -v apt-get >/dev/null 2>&1 || die "缺少依赖: ${missing[*]}。请先安装后重试。"
-  command -v sudo >/dev/null 2>&1 || die "缺少依赖: ${missing[*]}，且未找到 sudo。"
-
-  log "准备安装系统依赖: ${missing[*]}"
-  sudo apt-get update
-  sudo apt-get install -y "${missing[@]}"
-}
-
-user_bus_ready() {
-  systemctl --user show-environment >/dev/null 2>&1
-}
-
-enable_linger_if_possible() {
-  local current_user
-
-  command -v loginctl >/dev/null 2>&1 || return
-  command -v sudo >/dev/null 2>&1 || return
-
-  current_user="$(id -un)"
-  if loginctl show-user "$current_user" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
-    return
-  fi
-
-  log "尝试启用 systemd linger。"
-  sudo loginctl enable-linger "$current_user" || true
-}
-
-ensure_user_systemd() {
-  local current_user
-
-  command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl。"
-  if user_bus_ready; then
-    return
-  fi
-
-  enable_linger_if_possible
-  if user_bus_ready; then
-    return
-  fi
-
-  current_user="$(id -un)"
-  die "当前会话没有可用的 systemd user bus。请重新登录后再运行，或先执行: sudo loginctl enable-linger ${current_user}"
 }
 
 mihomo_asset_regexes() {
@@ -234,7 +389,23 @@ announce_mihomo_download() {
 resolve_mihomo_download_url() {
   local release_json url pattern
 
-  release_json="$(curl -fsSL "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest")" || return 1
+  ensure_download_tool
+  if command -v curl >/dev/null 2>&1; then
+    release_json="$(curl -fsSL "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest")" || return 1
+  elif command -v python3 >/dev/null 2>&1; then
+    release_json="$(
+      DOWNLOAD_URL="https://api.github.com/repos/${MIHOMO_REPO}/releases/latest" python3 - <<'PY'
+import os
+import urllib.request
+
+with urllib.request.urlopen(os.environ["DOWNLOAD_URL"], timeout=30) as response:
+    print(response.read().decode("utf-8", "replace"))
+PY
+    )" || return 1
+  else
+    release_json="$(wget -qO- "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest")" || return 1
+  fi
+
   while IFS= read -r pattern; do
     [ -n "$pattern" ] || continue
     url="$(printf '%s\n' "$release_json" | grep -Eo "https://[^\"]+/${pattern}" | head -n 1 || true)"
@@ -245,6 +416,34 @@ resolve_mihomo_download_url() {
   done <<< "$(mihomo_asset_regexes)"
 
   return 1
+}
+
+extract_gzip() {
+  local archive="$1"
+  local output="$2"
+
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -dc "$archive" > "$output"
+    return
+  fi
+
+  if command -v gunzip >/dev/null 2>&1; then
+    gunzip -c "$archive" > "$output"
+    return
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    GZIP_ARCHIVE="$archive" GZIP_OUTPUT="$output" python3 - <<'PY'
+import gzip
+import os
+
+with gzip.open(os.environ["GZIP_ARCHIVE"], "rb") as source, open(os.environ["GZIP_OUTPUT"], "wb") as target:
+    target.write(source.read())
+PY
+    return
+  fi
+
+  die "未找到 gzip/gunzip/python3，无法解压: ${archive}"
 }
 
 install_mihomo() {
@@ -265,7 +464,7 @@ install_mihomo() {
     [ -n "$url" ] || die "查询 mihomo release 失败。你也可以手动下载压缩包后放到 ${CACHE_DIR}"
     archive="${CACHE_DIR}/${url##*/}"
     log "自动下载: ${url}"
-    if ! curl -fL "$url" -o "$archive"; then
+    if ! download_file "$url" "$archive"; then
       die "下载 mihomo 失败。你也可以手动下载 ${url##*/} 后放到 ${archive}"
     fi
   else
@@ -274,11 +473,7 @@ install_mihomo() {
 
   tmp_dir="$(mktemp -d)"
   tmp_bin="${tmp_dir}/mihomo"
-  if ! gzip -dc "$archive" > "$tmp_bin"; then
-    rm -rf "$tmp_dir"
-    die "解压 mihomo 失败: ${archive}"
-  fi
-
+  extract_gzip "$archive" "$tmp_bin"
   install -m 0755 "$tmp_bin" "$MIHOMO_BIN"
   rm -rf "$tmp_dir"
   log "已安装 mihomo: ${MIHOMO_BIN}"
@@ -299,7 +494,7 @@ install_geoip_metadb() {
     log "当前配置依赖 geoip.metadb。"
     log "如网络不好，可手动下载后放到: ${cache_file}"
     log "下载地址: ${GEOIP_URL}"
-    if ! curl -fL "$GEOIP_URL" -o "$cache_file"; then
+    if ! download_file "$GEOIP_URL" "$cache_file"; then
       die "下载 geoip.metadb 失败。你也可以手动下载后放到 ${cache_file}"
     fi
   fi
@@ -426,9 +621,9 @@ EOF
   chmod 600 "$CLIENT_INFO_FILE"
 }
 
-write_user_service() {
+write_systemd_service() {
   mkdir -p "$SYSTEMD_USER_DIR"
-  cat > "$SERVICE_FILE" <<EOF
+  cat > "$SYSTEMD_SERVICE_FILE" <<EOF
 [Unit]
 Description=mihomo client
 Documentation=https://github.com/${MIHOMO_REPO}
@@ -446,6 +641,110 @@ WantedBy=default.target
 EOF
 
   systemctl --user daemon-reload
+}
+
+write_init_service() {
+  local name tmp_file service_file
+
+  name="$(client_service_name)"
+  service_file="/etc/init.d/${name}"
+  tmp_file="$(mktemp)"
+  cat > "$tmp_file" <<EOF
+#!/bin/sh
+USER_NAME=$(shell_quote "$(id -un)")
+BIN=$(shell_quote "$MIHOMO_BIN")
+CFG_DIR=$(shell_quote "$MIHOMO_CONFIG_DIR")
+CFG_FILE=$(shell_quote "$MIHOMO_CONFIG_FILE")
+STATE_DIR=$(shell_quote "$STATE_DIR")
+PID_FILE=$(shell_quote "$PID_FILE")
+LOG_FILE=$(shell_quote "$LOG_FILE")
+
+run_as_user() {
+  su -s /bin/sh "\$USER_NAME" -c "\$1"
+}
+
+is_running() {
+  [ -f "\$PID_FILE" ] && kill -0 "\$(cat "\$PID_FILE" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+  if is_running; then
+    echo "${name} is already running"
+    exit 0
+  fi
+  mkdir -p "\$STATE_DIR"
+  chown "\$USER_NAME":"\$USER_NAME" "\$STATE_DIR" 2>/dev/null || true
+  run_as_user "mkdir -p '$STATE_DIR' && nohup '$MIHOMO_BIN' -d '$MIHOMO_CONFIG_DIR' -f '$MIHOMO_CONFIG_FILE' >> '$LOG_FILE' 2>&1 & echo \\\$! > '$PID_FILE'"
+  sleep 1
+  is_running || exit 1
+}
+
+stop() {
+  if ! is_running; then
+    echo "${name} is not running"
+    rm -f "\$PID_FILE"
+    exit 0
+  fi
+  kill "\$(cat "\$PID_FILE")"
+  sleep 1
+  rm -f "\$PID_FILE"
+}
+
+status() {
+  if is_running; then
+    echo "${name} is running with pid \$(cat "\$PID_FILE")"
+    exit 0
+  fi
+  echo "${name} is not running"
+  exit 1
+}
+
+case "\${1:-}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop || true; start ;;
+  status) status ;;
+  *) echo "Usage: \$0 {start|stop|restart|status}"; exit 1 ;;
+esac
+EOF
+
+  run_root install -m 0755 "$tmp_file" "$service_file"
+  rm -f "$tmp_file"
+}
+
+enable_service() {
+  local name
+
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user enable mihomo.service >/dev/null 2>&1 || true
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      if command -v chkconfig >/dev/null 2>&1; then
+        run_root chkconfig --add "$name" >/dev/null 2>&1 || true
+        run_root chkconfig "$name" on >/dev/null 2>&1 || true
+      elif command -v update-rc.d >/dev/null 2>&1; then
+        run_root update-rc.d "$name" defaults >/dev/null 2>&1 || true
+      elif command -v rc-update >/dev/null 2>&1; then
+        run_root rc-update add "$name" default >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+write_service_files() {
+  case "$(client_service_mode)" in
+    systemd-user)
+      write_systemd_service
+      ;;
+    sysv)
+      write_init_service
+      ;;
+    foreground)
+      log "未检测到可用的 systemd --user 或 service，后续将以前台方式运行。"
+      ;;
+  esac
 }
 
 detect_rc_file() {
@@ -473,11 +772,12 @@ remove_loader_from_file() {
 }
 
 install_shell_loader() {
-  local rc_file proxy_env_path script_path
+  local rc_file proxy_env_path script_path script_path_shell
 
   rc_file="$(detect_rc_file)"
   proxy_env_path="$(shell_quote "$PROXY_ENV_FILE")"
   script_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+  script_path_shell="$(shell_quote "$script_path")"
 
   mkdir -p "$(dirname "$rc_file")"
   touch "$rc_file"
@@ -496,7 +796,7 @@ fi
 unset __clash_service_proxy_env
 
 clash_service() {
-  __clash_service_script=$(shell_quote "$script_path")
+  __clash_service_script=${script_path_shell}
   if CLASH_SERVICE_SHELL_FUNCTION=1 bash "\$__clash_service_script" "\$@"; then
     __clash_service_status=0
   else
@@ -573,47 +873,100 @@ EOF
 }
 
 start_service() {
-  ensure_user_systemd
-  systemctl --user daemon-reload
-  systemctl --user enable --now "$SERVICE_NAME"
+  local name
+
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user daemon-reload
+      enable_service
+      systemctl --user start mihomo.service
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      enable_service
+      if run_root service "$name" start; then
+        return
+      fi
+      write_proxy_enabled_env
+      log "service 启动失败，回退到前台方式运行 mihomo。停止时请按 Ctrl-C。"
+      exec "$MIHOMO_BIN" -d "$MIHOMO_CONFIG_DIR" -f "$MIHOMO_CONFIG_FILE"
+      ;;
+    foreground)
+      write_proxy_enabled_env
+      log "未检测到后台服务管理器，正在以前台方式运行 mihomo。停止时请按 Ctrl-C。"
+      exec "$MIHOMO_BIN" -d "$MIHOMO_CONFIG_DIR" -f "$MIHOMO_CONFIG_FILE"
+      ;;
+  esac
 }
 
 stop_service() {
-  if ! command -v systemctl >/dev/null 2>&1 || ! user_bus_ready; then
-    return
-  fi
+  local name
 
-  systemctl --user disable --now "$SERVICE_NAME"
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user stop mihomo.service
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      run_root service "$name" stop
+      ;;
+    foreground)
+      log "当前是前台模式。请在运行 mihomo 的终端中按 Ctrl-C 停止。"
+      ;;
+  esac
 }
 
 restart_service() {
-  ensure_user_systemd
-  systemctl --user daemon-reload
-  systemctl --user restart "$SERVICE_NAME"
-}
+  local name
 
-local_curl() {
-  env \
-    -u http_proxy \
-    -u https_proxy \
-    -u all_proxy \
-    -u HTTP_PROXY \
-    -u HTTPS_PROXY \
-    -u ALL_PROXY \
-    curl --noproxy '*' "$@"
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user daemon-reload
+      enable_service
+      systemctl --user restart mihomo.service
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      enable_service
+      if run_root service "$name" restart; then
+        return
+      fi
+      write_proxy_enabled_env
+      log "service 重启失败，回退到前台方式运行 mihomo。停止时请按 Ctrl-C。"
+      exec "$MIHOMO_BIN" -d "$MIHOMO_CONFIG_DIR" -f "$MIHOMO_CONFIG_FILE"
+      ;;
+    foreground)
+      write_proxy_enabled_env
+      log "未检测到后台服务管理器，restart 会以前台方式重新运行 mihomo。"
+      exec "$MIHOMO_BIN" -d "$MIHOMO_CONFIG_DIR" -f "$MIHOMO_CONFIG_FILE"
+      ;;
+  esac
 }
 
 wait_controller() {
   local attempt
 
   for attempt in $(seq 1 15); do
-    if local_curl -fsS --max-time 1 "${MIHOMO_CONTROLLER_URL}/version" >/dev/null 2>&1; then
+    if http_get "${MIHOMO_CONTROLLER_URL}/version" 1 1 >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
 
   return 1
+}
+
+delay_request() {
+  if command -v curl >/dev/null 2>&1; then
+    env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+      curl -fsS --noproxy '*' --max-time "$CONNECTIVITY_CURL_TIMEOUT" \
+      -G "${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
+      --data-urlencode "timeout=${CONNECTIVITY_TIMEOUT_MS}" \
+      --data-urlencode "url=${CONNECTIVITY_TEST_URL}"
+    return
+  fi
+
+  http_get "$(build_delay_url)" "$CONNECTIVITY_CURL_TIMEOUT" 1
 }
 
 check_proxy_connectivity() {
@@ -630,14 +983,11 @@ check_proxy_connectivity() {
   log "等待 mihomo controller: ${MIHOMO_CONTROLLER_URL}"
   if ! wait_controller; then
     write_proxy_disabled_env
-    die "mihomo 已启动，但本地 controller 不可访问。请查看日志: journalctl --user -u ${SERVICE_NAME} -e --no-pager"
+    die "mihomo 已启动，但本地 controller 不可访问。请查看日志。"
   fi
 
   log "检测代理节点: ${MIHOMO_PROXY_NAME} -> ${CONNECTIVITY_TEST_URL}"
-  if response="$(local_curl -fsS --max-time "$CONNECTIVITY_CURL_TIMEOUT" \
-    -G "${MIHOMO_CONTROLLER_URL}/proxies/${MIHOMO_PROXY_NAME}/delay" \
-    --data-urlencode "timeout=${CONNECTIVITY_TIMEOUT_MS}" \
-    --data-urlencode "url=${CONNECTIVITY_TEST_URL}" 2>/dev/null)" &&
+  if response="$(delay_request 2>/dev/null)" &&
     printf '%s' "$response" | grep -Eq '"delay"[[:space:]]*:[[:space:]]*[0-9]+'; then
     log "代理连通性检测通过: ${response}"
     return
@@ -652,22 +1002,38 @@ client_ready() {
 }
 
 ensure_runtime() {
-  install_packages
-  ensure_user_systemd
   install_mihomo
   if config_needs_geoip; then
     install_geoip_metadb
   fi
-  write_user_service
+  write_service_files
   install_shell_loader
 }
 
+print_install_summary() {
+  local server_addr="$1"
+  local server_port="$2"
+  local password="$3"
+  local sni="$4"
+
+  cat <<EOF
+
+安装完成。
+客户端连接信息:
+  server: ${server_addr}
+  port: ${server_port}
+  password: ${password}
+  sni: ${sni}
+  saved: ${CLIENT_INFO_FILE}
+  service-mode: $(client_service_mode)
+EOF
+}
+
 install_client() {
-  local server_addr server_port password sni
+  local server_addr server_port password sni mode
 
   need_user
-  install_packages
-  ensure_user_systemd
+  mode="$(client_service_mode)"
 
   server_addr="$(ask "服务端地址/IP" "127.0.0.1")"
   [ -n "$server_addr" ] || die "服务端地址不能为空。"
@@ -681,26 +1047,25 @@ install_client() {
   install_mihomo
   write_mihomo_config "$server_addr" "$server_port" "$password" "$sni"
   write_client_info "$server_addr" "$server_port" "$password" "$sni"
-  write_user_service
+  write_service_files
   install_shell_loader
+
+  if [ "$mode" = "foreground" ]; then
+    write_proxy_disabled_env
+    print_install_summary "$server_addr" "$server_port" "$password" "$sni"
+    cat <<'EOF'
+
+未检测到可用的后台服务管理器。
+需要时请执行:
+  bash client.sh start
+EOF
+    return
+  fi
+
   start_service
   check_proxy_connectivity
   write_proxy_enabled_env
-
-  cat <<EOF
-
-安装完成。
-客户端连接信息:
-  server: ${server_addr}
-  port: ${server_port}
-  password: ${password}
-  sni: ${sni}
-  saved: ${CLIENT_INFO_FILE}
-
-新开的终端可使用:
-  clash_service start
-  clash_service stop
-EOF
+  print_install_summary "$server_addr" "$server_port" "$password" "$sni"
 }
 
 start_client() {
@@ -712,6 +1077,11 @@ start_client() {
   fi
 
   ensure_runtime
+  if [ "$(client_service_mode)" = "foreground" ]; then
+    start_service
+    return
+  fi
+
   start_service
   check_proxy_connectivity
   write_proxy_enabled_env
@@ -724,9 +1094,22 @@ stop_client() {
 }
 
 status_client() {
+  local name
+
   need_user
-  ensure_user_systemd
-  systemctl --user --no-pager status "$SERVICE_NAME" || true
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user --no-pager status mihomo.service || true
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      run_root service "$name" status || true
+      ;;
+    foreground)
+      printf 'Service mode: foreground\n'
+      printf 'Start command: %s -d %s -f %s\n' "$MIHOMO_BIN" "$MIHOMO_CONFIG_DIR" "$MIHOMO_CONFIG_FILE"
+      ;;
+  esac
 
   printf '\nProxy env file: %s\n' "$PROXY_ENV_FILE"
   if [ -f "$PROXY_ENV_FILE" ]; then
@@ -737,14 +1120,18 @@ status_client() {
 }
 
 uninstall_client() {
-  local answer=""
+  local answer="" name
 
   need_user
-  systemctl --user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-  systemctl --user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
-  rm -f "$SERVICE_FILE" "$MIHOMO_BIN"
+  name="$(client_service_name)"
+
+  systemctl --user stop mihomo.service >/dev/null 2>&1 || true
+  systemctl --user disable mihomo.service >/dev/null 2>&1 || true
+  run_root service "$name" stop >/dev/null 2>&1 || true
+  run_root rm -f "/etc/init.d/${name}" >/dev/null 2>&1 || true
+  rm -f "$SYSTEMD_SERVICE_FILE" "$MIHOMO_BIN" "$PID_FILE"
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-  systemctl --user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl --user reset-failed mihomo.service >/dev/null 2>&1 || true
   remove_shell_loader
   write_proxy_disabled_env
 
@@ -771,6 +1158,10 @@ main() {
     restart)
       need_user
       ensure_runtime
+      if [ "$(client_service_mode)" = "foreground" ]; then
+        restart_service
+        return
+      fi
       restart_service
       check_proxy_connectivity
       write_proxy_enabled_env

@@ -27,7 +27,7 @@ bash advanced/client-tun.sh enable
 
 - 备份 `config.yaml`
 - 把 `tun.enable` 改成 `true`
-- 如果缺少 `setcap`，自动安装 `libcap2-bin`
+- 如果缺少 `setcap`，尝试按当前发行版自动安装对应的 `libcap` 包
 - 给 `mihomo` 授予 `cap_net_admin,cap_net_bind_service`
 - 尝试重启 `mihomo.service`
 

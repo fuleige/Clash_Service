@@ -22,6 +22,56 @@ Usage:
 EOF
 }
 
+run_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo "$@"
+}
+
+pkg_manager() {
+  local manager
+
+  for manager in apt-get dnf yum zypper apk; do
+    if command -v "$manager" >/dev/null 2>&1; then
+      printf '%s' "$manager"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+install_packages() {
+  local manager
+
+  [ "$#" -gt 0 ] || return 0
+  manager="$(pkg_manager || true)"
+  [ -n "$manager" ] || return 1
+
+  case "$manager" in
+    apt-get)
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get update
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+      ;;
+    dnf)
+      run_root dnf install -y "$@"
+      ;;
+    yum)
+      run_root yum install -y "$@"
+      ;;
+    zypper)
+      run_root zypper --non-interactive install "$@"
+      ;;
+    apk)
+      run_root apk add --no-cache "$@"
+      ;;
+  esac
+}
+
 target_user() {
   if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
     printf '%s' "$SUDO_USER"
@@ -108,15 +158,7 @@ ensure_setcap() {
     return
   fi
 
-  command -v apt-get >/dev/null 2>&1 || die "未找到 setcap，请先安装 libcap2-bin。"
-  if [ "$(id -u)" -eq 0 ]; then
-    apt-get update
-    apt-get install -y libcap2-bin
-  else
-    command -v sudo >/dev/null 2>&1 || die "未找到 setcap，且未找到 sudo。请先安装 libcap2-bin。"
-    sudo apt-get update
-    sudo apt-get install -y libcap2-bin
-  fi
+  install_packages libcap2-bin || install_packages libcap || die "未找到 setcap，且自动安装失败。请手动安装包含 setcap 的 libcap 包。"
 }
 
 grant_capability() {

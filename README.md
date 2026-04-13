@@ -3,9 +3,9 @@
 用两个脚本快速搭一个基于 `trojan-go` + `mihomo` 的简单代理服务。
 
 - `server.sh`
-  安装 `trojan-go`、生成自签名证书、写入 `systemd` 服务。
+  安装 `trojan-go`、生成自签名证书，并按环境选择 `systemd`、`service` 或前台运行。
 - `client.sh`
-  安装 `mihomo`、生成 Clash 配置、写入 `systemd --user` 服务，并管理终端代理环境变量。
+  安装 `mihomo`、生成 Clash 配置，并按环境选择 `systemd --user`、`service` 或前台运行。
 - `advanced/client-tun.sh`
   可选的 TUN 开关脚本。
 
@@ -48,16 +48,20 @@ clash_service status
 
 服务端：
 
-- 自动安装缺少的 `curl`、`unzip`、`openssl`、`ca-certificates`
 - 自动下载或复用 `trojan-go`
-- 自动生成证书、配置和 `systemd` 服务
+- 自动生成证书和配置
+- 有 `systemd` 时写入 `systemd` 服务
+- 没有 `systemd` 但有 `service`/`init.d` 时写入兼容脚本
+- 两者都没有时，`start` 直接前台运行
 - 如果检测到 `ufw` 或 `firewalld` 已启用，会自动放行端口
 
 客户端：
 
-- 自动安装缺少的 `curl`、`gzip`、`ca-certificates`
 - 自动下载或复用 `mihomo`
-- 自动生成 `config.yaml`、用户级 `systemd` 服务和 shell loader
+- 自动生成 `config.yaml` 和 shell loader
+- 有可用的 `systemd --user` 时写入用户级服务
+- 没有 `systemd --user` 但有 `service` 时写入兼容脚本
+- 两者都没有时，`start` 直接前台运行
 - 启动后自动检测 `trojan-service` 节点是否可用
 - 检测本地 controller 时会主动绕过当前 shell 已存在的旧代理环境变量，避免误判
 - 如果旧配置需要 `geoip.metadb`，也会自动下载或复用它
@@ -65,6 +69,7 @@ clash_service status
 ## 离线下载
 
 脚本在真正下载前，会先打印需要的文件名、下载地址和缓存目录。
+主下载流程优先使用 `curl`、`wget` 或 `python3`，尽量不依赖 `apt`、`yum` 这类包管理器。只有缺少必要系统工具时，才会尝试自动调用系统包管理器补齐。
 
 服务端：
 
@@ -160,12 +165,20 @@ sudo systemctl status trojan-go.service
 sudo journalctl -u trojan-go.service -e --no-pager
 ```
 
+如果当前环境不是 `systemd`，可以改用：
+
+```bash
+sudo service trojan-go status
+```
+
 客户端日志：
 
 ```bash
 systemctl --user status mihomo.service
 journalctl --user -u mihomo.service -e --no-pager
 ```
+
+如果当前环境没有可用的 `systemd --user`，脚本会优先退回 `service`，再不行就退回前台运行。
 
 如果客户端启动后检测失败，可以临时换检测地址：
 
@@ -179,7 +192,7 @@ CLASH_SERVICE_CHECK_URL=https://www.cloudflare.com/cdn-cgi/trace bash client.sh 
 CLASH_SERVICE_SKIP_CHECK=1 bash client.sh restart
 ```
 
-如果 `systemctl --user` 报 `Failed to connect to bus`，说明当前会话没有可用的 user bus。常见处理：
+如果 `systemctl --user` 报 `Failed to connect to bus`，说明当前会话没有可用的 user bus。脚本会先尝试启用 linger；仍然不行时，会退回 `service`，再不行就退回前台运行。常见手动处理：
 
 ```bash
 sudo loginctl enable-linger "$USER"
