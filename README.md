@@ -68,34 +68,49 @@ sudo bash server.sh uninstall
 
 ### 方式 A：纯 Linux 终端客户端
 
-`client.sh` 只面向纯 Linux 终端环境。
+`client.sh` 只面向纯 Linux 终端环境。请用普通用户运行，不要用 `root` 或 `sudo`，否则会装到 root 自己的用户目录里。
 
-使用普通用户运行：
+第一次安装：
 
 ```bash
 bash client.sh install
 ```
 
-如果直接用 `root` 或 `sudo` 运行，脚本现在只会告警并继续执行，但会把 `mihomo`、配置和代理环境安装到 root 对应的用户目录里，通常不是你日常登录的那个用户环境。
+安装时按提示输入服务端地址、端口、密码和 SNI 即可。
 
-这个安装流程主要会做 4 件事：
+最常用的命令：
 
-- 下载或复用 `mihomo`
-- 根据你输入的服务端地址、端口、密码、SNI，生成 `~/.config/mihomo/config.yaml`
-- 在可用的后台服务管理器环境中自动启动本地 `mihomo`，并连接到服务端的 `trojan-service`
-- 为后续新终端写入代理环境变量加载逻辑
+```bash
+bash client.sh start
+bash client.sh stop
+bash client.sh restart
+bash client.sh status
+```
 
-最重要的本地代理入口是：
-
-- `127.0.0.1:7890`
-
-这是 `mihomo` 的本地 HTTP 代理端口。终端代理环境变量会默认指向它。大多数命令行程序只要读取了代理环境变量，就会通过这个端口走 HTTP/HTTPS 代理。
-
-如果你要手动给程序填代理地址，通常也优先填：
+本地代理入口：
 
 ```text
 http://127.0.0.1:7890
 ```
+
+大多数命令行程序只要读取了标准代理环境变量，就会通过这个本地入口走代理。
+
+如果后续服务端 IP、端口、密码或 SNI 变了，执行：
+
+```bash
+bash client.sh update
+```
+
+如果想让当前终端立刻生效，手动执行：
+
+```bash
+source ~/.config/clash-service/proxy.env
+```
+
+更多细节：
+
+<details>
+<summary>点击查看：连接信息保存和 update 的行为</summary>
 
 安装完成后，连接信息会保存到：
 
@@ -107,17 +122,16 @@ http://127.0.0.1:7890
 
 如果本地 `mihomo` 配置文件丢失，但这个连接信息文件还在，`bash client.sh start` 和 `bash client.sh restart` 会优先尝试根据它自动恢复配置，而不是重新让你输入一遍。
 
-如果后续服务端 IP、端口、密码或 SNI 变了，标准做法是执行：
-
-```bash
-bash client.sh update
-```
-
-这个命令会用当前保存的连接信息作为默认值，只更新 `~/.config/mihomo/config.yaml` 里的 `server`、`port`、`password`、`sni`，同时同步刷新 `~/.config/clash-service/client-info.txt`。
+`bash client.sh update` 会用当前保存的连接信息作为默认值，只更新 `~/.config/mihomo/config.yaml` 里的 `server`、`port`、`password`、`sni`，同时同步刷新 `~/.config/clash-service/client-info.txt`。
 
 如果你已经手动启用了 `tun`、补过自定义规则，或者额外加了别的代理节点，`update` 不会把这些内容整份覆盖掉。
 
 如果客户端当前由 `systemd --user` 或 `service` 管理且正在运行，`update` 会自动重启并做一次连通性检测；如果当前是前台模式，需要你在原来的运行终端里先按 `Ctrl-C`，再重新执行 `bash client.sh start`。
+
+</details>
+
+<details>
+<summary>点击查看：代理环境变量和前台模式说明</summary>
 
 代理环境变量会写到：
 
@@ -132,7 +146,15 @@ bash client.sh update
 - `HTTP_PROXY=$http_proxy`
 - `HTTPS_PROXY=$https_proxy`
 
-也就是说，后续新终端里大多数支持标准 HTTP/HTTPS 代理环境变量的程序都会直接走本地 `mihomo` 代理。
+如果你直接执行 `bash client.sh install` 或 `bash client.sh start`，当前这个终端不会被脚本反向改写；新开的终端会自动读取 `proxy.env`。
+
+`stop` 或 `disable` 会把后续新终端中的代理环境变量一起清掉。
+
+如果当前环境没有可用的后台服务管理器，`install` 会先写好配置，等你执行 `bash client.sh start` 后再以前台方式运行。
+
+如果当前环境既没有可用的 `systemd --user`，也没有可用的 `service`，`start` 和 `restart` 会直接前台运行 `mihomo`。这时要把它放在一个专门终端里运行，并保持该终端不要关闭。
+
+</details>
 
 <details>
 <summary>点击查看：controller 和本地 DNS 是什么</summary>
@@ -155,7 +177,7 @@ bash client.sh update
 
 </details>
 
-之后直接调用脚本：
+其他可直接调用的命令：
 
 ```bash
 bash client.sh update
@@ -167,15 +189,6 @@ bash client.sh enable
 bash client.sh disable
 bash client.sh uninstall
 ```
-
-补充说明：
-
-- 如果你直接执行 `bash client.sh install` 或 `bash client.sh start`，当前这个终端不会被脚本反向改写；新开的终端会自动读取 `proxy.env`
-- 如果想让当前终端立刻生效，可以手动执行 `source ~/.config/clash-service/proxy.env`
-- `stop` 或 `disable` 会把后续新终端中的代理环境变量一起清掉
-- 如果当前环境没有可用的后台服务管理器，`install` 会先写好配置，等你执行 `bash client.sh start` 后再以前台方式运行
-
-如果当前环境既没有可用的 `systemd --user`，也没有可用的 `service`，`start` 和 `restart` 会直接前台运行 `mihomo`。这时要把它放在一个专门终端里运行，并保持该终端不要关闭。
 
 ### 方式 B：图形客户端或路由器客户端
 
