@@ -107,6 +107,18 @@ http://127.0.0.1:7890
 
 如果本地 `mihomo` 配置文件丢失，但这个连接信息文件还在，`bash client.sh start` 和 `bash client.sh restart` 会优先尝试根据它自动恢复配置，而不是重新让你输入一遍。
 
+如果后续服务端 IP、端口、密码或 SNI 变了，标准做法是执行：
+
+```bash
+bash client.sh update
+```
+
+这个命令会用当前保存的连接信息作为默认值，只更新 `~/.config/mihomo/config.yaml` 里的 `server`、`port`、`password`、`sni`，同时同步刷新 `~/.config/clash-service/client-info.txt`。
+
+如果你已经手动启用了 `tun`、补过自定义规则，或者额外加了别的代理节点，`update` 不会把这些内容整份覆盖掉。
+
+如果客户端当前由 `systemd --user` 或 `service` 管理且正在运行，`update` 会自动重启并做一次连通性检测；如果当前是前台模式，需要你在原来的运行终端里先按 `Ctrl-C`，再重新执行 `bash client.sh start`。
+
 代理环境变量会写到：
 
 ```text
@@ -146,6 +158,7 @@ http://127.0.0.1:7890
 之后在新开的终端里使用：
 
 ```bash
+clash_service update
 clash_service start
 clash_service stop
 clash_service restart
@@ -155,6 +168,7 @@ clash_service status
 也可以直接调用脚本：
 
 ```bash
+bash client.sh update
 bash client.sh start
 bash client.sh stop
 bash client.sh restart

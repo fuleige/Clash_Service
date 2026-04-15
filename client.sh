@@ -44,6 +44,7 @@ usage() {
   cat <<'EOF'
 Usage:
   bash client.sh install
+  bash client.sh update
   bash client.sh start
   bash client.sh stop
   bash client.sh restart
@@ -663,6 +664,222 @@ read_saved_client_field() {
   sed -n "s/^${field}:[[:space:]]*//p" "$CLIENT_INFO_FILE" | head -n 1
 }
 
+read_current_mihomo_proxy_field() {
+  local field="$1"
+
+  [ -f "$MIHOMO_CONFIG_FILE" ] || return 0
+  awk -v proxy_name="$MIHOMO_PROXY_NAME" -v field="$field" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+
+    function unquote(value) {
+      value = trim(value)
+      if (value ~ /^".*"$/ || value ~ /^'\''.*'\''$/) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      gsub(/\047\047/, "\047", value)
+      return value
+    }
+
+    /^proxies:[[:space:]]*$/ { in_proxies = 1; next }
+    in_proxies && /^[^[:space:]#][^:]*:[[:space:]]*/ { exit }
+    in_proxies && /^  - / {
+      current_target = 0
+      if ($0 ~ /^  - name:[[:space:]]*/) {
+        value = $0
+        sub(/^  - name:[[:space:]]*/, "", value)
+        if (unquote(value) == proxy_name) {
+          current_target = 1
+        }
+      }
+      next
+    }
+    in_proxies && current_target && $0 ~ ("^    " field ":[[:space:]]*") {
+      value = $0
+      sub("^    " field ":[[:space:]]*", "", value)
+      print unquote(value)
+      exit
+    }
+  ' "$MIHOMO_CONFIG_FILE" | head -n 1
+}
+
+client_connection_default() {
+  local field="$1"
+  local fallback="$2"
+  local value=""
+
+  value="$(read_saved_client_field "$field")"
+  if [ -z "$value" ]; then
+    value="$(read_current_mihomo_proxy_field "$field")"
+  fi
+
+  printf '%s' "${value:-$fallback}"
+}
+
+update_mihomo_proxy_connection() {
+  local server_addr="$1"
+  local server_port="$2"
+  local password="$3"
+  local sni="$4"
+  local tmp_file
+  local server_line port_line password_line sni_line
+
+  [ -f "$MIHOMO_CONFIG_FILE" ] || return 1
+
+  tmp_file="$(mktemp "${MIHOMO_CONFIG_FILE}.tmp.XXXXXX")"
+  server_line="    server: $(yaml_quote "$server_addr")"
+  port_line="    port: ${server_port}"
+  password_line="    password: $(yaml_quote "$password")"
+  sni_line="    sni: $(yaml_quote "$sni")"
+
+  if awk \
+    -v proxy_name="$MIHOMO_PROXY_NAME" \
+    -v server_line="$server_line" \
+    -v port_line="$port_line" \
+    -v password_line="$password_line" \
+    -v sni_line="$sni_line" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+
+    function unquote(value) {
+      value = trim(value)
+      if (value ~ /^".*"$/ || value ~ /^'\''.*'\''$/) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      gsub(/\047\047/, "\047", value)
+      return value
+    }
+
+    function flush_missing() {
+      if (!updated_server) print server_line
+      if (!updated_port) print port_line
+      if (!updated_password) print password_line
+      if (!updated_sni) print sni_line
+    }
+
+    BEGIN {
+      in_proxies = 0
+      in_target = 0
+      found_target = 0
+      updated_server = 0
+      updated_port = 0
+      updated_password = 0
+      updated_sni = 0
+    }
+
+    /^proxies:[[:space:]]*$/ {
+      if (in_target) {
+        flush_missing()
+        in_target = 0
+      }
+      in_proxies = 1
+      print
+      next
+    }
+
+    in_proxies && /^[^[:space:]#][^:]*:[[:space:]]*/ {
+      if (in_target) {
+        flush_missing()
+        in_target = 0
+      }
+      in_proxies = 0
+      print
+      next
+    }
+
+    in_proxies && /^  - / {
+      if (in_target) {
+        flush_missing()
+        in_target = 0
+      }
+
+      updated_server = 0
+      updated_port = 0
+      updated_password = 0
+      updated_sni = 0
+
+      if ($0 ~ /^  - name:[[:space:]]*/) {
+        value = $0
+        sub(/^  - name:[[:space:]]*/, "", value)
+        if (unquote(value) == proxy_name) {
+          in_target = 1
+          found_target = 1
+        }
+      }
+
+      print
+      next
+    }
+
+    in_target && /^    server:[[:space:]]*/ {
+      print server_line
+      updated_server = 1
+      next
+    }
+
+    in_target && /^    port:[[:space:]]*/ {
+      print port_line
+      updated_port = 1
+      next
+    }
+
+    in_target && /^    password:[[:space:]]*/ {
+      print password_line
+      updated_password = 1
+      next
+    }
+
+    in_target && /^    sni:[[:space:]]*/ {
+      print sni_line
+      updated_sni = 1
+      next
+    }
+
+    {
+      print
+    }
+
+    END {
+      if (in_target) {
+        flush_missing()
+      }
+      if (!found_target) {
+        exit 3
+      }
+    }
+  ' "$MIHOMO_CONFIG_FILE" > "$tmp_file"; then
+    mv "$tmp_file" "$MIHOMO_CONFIG_FILE"
+    chmod 600 "$MIHOMO_CONFIG_FILE"
+    return 0
+  fi
+
+  rm -f "$tmp_file"
+  return 1
+}
+
+client_service_running() {
+  local name
+
+  case "$(client_service_mode)" in
+    systemd-user)
+      systemctl --user is-active --quiet mihomo.service
+      ;;
+    sysv)
+      name="$(client_service_name)"
+      run_root service "$name" status >/dev/null 2>&1
+      ;;
+    foreground)
+      return 1
+      ;;
+  esac
+}
+
 restore_client_config_from_saved_info() {
   local server_addr server_port password sni
 
@@ -874,7 +1091,7 @@ clash_service() {
   fi
 
   case "\${1:-}" in
-    install | start | enable | restart | stop | disable | uninstall)
+    install | update | start | enable | restart | stop | disable | uninstall)
       if [ -f "\$__clash_service_proxy_env" ]; then
         . "\$__clash_service_proxy_env"
       else
@@ -1190,6 +1407,57 @@ EOF
   print_install_summary "$server_addr" "$server_port" "$password" "$sni"
 }
 
+update_client_connection() {
+  local server_addr server_port password sni
+  local server_addr_default server_port_default password_default sni_default
+
+  need_user
+  [ -x "$MIHOMO_BIN" ] || die "未检测到 mihomo，请先执行 bash client.sh install。"
+  announce_client_info_source
+
+  server_addr_default="$(client_connection_default server 127.0.0.1)"
+  server_port_default="$(client_connection_default port 443)"
+  password_default="$(client_connection_default password change-me)"
+  sni_default="$(client_connection_default sni "$server_addr_default")"
+
+  server_addr="$(ask "新的服务端地址/IP" "$server_addr_default")"
+  [ -n "$server_addr" ] || die "服务端地址不能为空。"
+  server_port="$(ask "新的服务端端口" "$server_port_default")"
+  validate_port "$server_port"
+  password="$(ask "新的 trojan 密码" "$password_default")"
+  [ -n "$password" ] || die "密码不能为空。"
+  sni="$(ask "新的 SNI" "$sni_default")"
+  [ -n "$sni" ] || die "SNI 不能为空。"
+
+  if [ -f "$MIHOMO_CONFIG_FILE" ]; then
+    if ! update_mihomo_proxy_connection "$server_addr" "$server_port" "$password" "$sni"; then
+      die "未能在现有配置中定位代理节点 ${MIHOMO_PROXY_NAME}。如果你想重建标准配置，可执行 bash client.sh install。"
+    fi
+    log "已原地更新 mihomo 配置中的服务端连接参数。"
+  else
+    log "未检测到 mihomo 配置，改为重新生成标准配置。"
+    write_mihomo_config "$server_addr" "$server_port" "$password" "$sni"
+  fi
+
+  write_client_info "$server_addr" "$server_port" "$password" "$sni"
+
+  if [ "$(client_service_mode)" = "foreground" ]; then
+    log "连接信息已更新并写入: ${CLIENT_INFO_FILE}"
+    log "如果 mihomo 正在另一个终端以前台运行，请先在原终端按 Ctrl-C，再执行: bash client.sh start"
+    return
+  fi
+
+  ensure_runtime
+  if client_service_running; then
+    restart_service
+    check_proxy_connectivity
+    write_proxy_enabled_env
+    log "连接信息已更新，并已自动重启客户端。"
+  else
+    log "连接信息已更新，但当前客户端未运行。需要时执行: bash client.sh start"
+  fi
+}
+
 start_client() {
   need_user
   if ! client_ready; then
@@ -1279,6 +1547,7 @@ uninstall_client() {
 main() {
   case "${1:-help}" in
     install) install_client ;;
+    update) update_client_connection ;;
     start) start_client ;;
     stop) stop_client ;;
     restart)
