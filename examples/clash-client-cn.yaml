@@ -1,0 +1,358 @@
+# CN-optimized Clash config for clients with Mihomo / Clash.Meta compatible
+# cores such as Clash Verge Rev, Mihomo Party and OpenClash.
+#
+# If you need a broader-compatibility minimal sample, use:
+#   examples/clash-client.yaml
+#
+# Replace these 4 values before importing:
+#   server   -> your server IP or domain
+#   port     -> the port configured by server.sh
+#   password -> the Trojan password configured by server.sh
+#   sni      -> the SNI / certificate name configured by server.sh
+#
+# This example keeps `skip-cert-verify: true` because server.sh
+# generates a self-signed certificate by default.
+#
+# The first start will download remote rule providers into:
+#   ./rule-providers/
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+# Edit these 4 values first before importing.
+proxies:
+  - name: trojan-service
+    type: trojan
+    server: "YOUR_SERVER_IP_OR_DOMAIN"
+    port: 443
+    password: "YOUR_TROJAN_PASSWORD"
+    sni: "YOUR_SNI_OR_DOMAIN"
+    skip-cert-verify: true
+    udp: true
+    client-fingerprint: chrome
+
+dns:
+  enable: true
+  ipv6: false
+  listen: 127.0.0.1:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  # Resolve the proxy node itself with domestic DNS first to keep bootstrap simple.
+  proxy-server-nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  fallback:
+    - "https://1.1.1.1/dns-query#trojan-service"
+    - "https://8.8.8.8/dns-query#trojan-service"
+  nameserver-policy:
+    "+.github.com":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "+.githubusercontent.com":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:private":
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
+    "rule-set:cn":
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
+    "rule-set:apple-cn":
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
+    "rule-set:microsoft-cn":
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
+    "rule-set:games-cn":
+      - https://dns.alidns.com/dns-query
+      - https://doh.pub/dns-query
+    "rule-set:openai":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:telegram":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:github":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:google":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:youtube":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:netflix":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+    "rule-set:geolocation-!cn":
+      - "https://1.1.1.1/dns-query#trojan-service"
+      - "https://8.8.8.8/dns-query#trojan-service"
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.localdomain"
+    - "*.home.arpa"
+    - "localhost"
+    - "localhost.ptlogin2.qq.com"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "+.ntp.org"
+    - "+.pool.ntp.org"
+    - "+.push.apple.com"
+    - "rule-set:private"
+    - "rule-set:cn"
+    - "rule-set:apple-cn"
+    - "rule-set:microsoft-cn"
+    - "rule-set:games-cn"
+
+proxy-groups:
+  - name: AUTO
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    proxies:
+      - trojan-service
+
+  - name: PROXY
+    type: select
+    proxies:
+      - trojan-service
+      - AUTO
+      - DIRECT
+
+  - name: OPENAI
+    type: select
+    proxies:
+      - PROXY
+      - trojan-service
+      - AUTO
+      - DIRECT
+
+  - name: TELEGRAM
+    type: select
+    proxies:
+      - PROXY
+      - trojan-service
+      - AUTO
+      - DIRECT
+
+  - name: GITHUB
+    type: select
+    proxies:
+      - PROXY
+      - trojan-service
+      - AUTO
+      - DIRECT
+
+  - name: STREAMING
+    type: select
+    proxies:
+      - PROXY
+      - trojan-service
+      - AUTO
+      - DIRECT
+
+  - name: MICROSOFT
+    type: select
+    proxies:
+      - DIRECT
+      - PROXY
+      - trojan-service
+      - AUTO
+
+  - name: APPLE
+    type: select
+    proxies:
+      - DIRECT
+      - PROXY
+      - trojan-service
+      - AUTO
+
+  - name: GAMES
+    type: select
+    proxies:
+      - DIRECT
+      - PROXY
+      - trojan-service
+      - AUTO
+
+  - name: ADS
+    type: select
+    proxies:
+      - REJECT
+      - DIRECT
+
+rule-providers:
+  reject:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/reject.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ads-all.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  private:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/private.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  cn:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/cn.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  cnip:
+    type: http
+    behavior: ipcidr
+    format: yaml
+    path: ./rule-providers/cnip.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  apple-cn:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/apple-cn.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/apple-cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  microsoft-cn:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/microsoft-cn.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/microsoft@cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  games-cn:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/games-cn.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-games@cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  openai:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/openai.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  telegram:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/telegram.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/telegram.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  github:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/github.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/github.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  google:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/google.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  youtube:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/youtube.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/youtube.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  netflix:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/netflix.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/netflix.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+  geolocation-!cn:
+    type: http
+    behavior: domain
+    format: yaml
+    path: ./rule-providers/geolocation-!cn.yaml
+    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-!cn.yaml"
+    interval: 86400
+    proxy: trojan-service
+
+rules:
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,lan,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR,240.0.0.0/4,DIRECT,no-resolve
+  - RULE-SET,reject,ADS
+  - RULE-SET,private,DIRECT
+  - RULE-SET,apple-cn,APPLE
+  - RULE-SET,microsoft-cn,MICROSOFT
+  - RULE-SET,games-cn,GAMES
+  - RULE-SET,openai,OPENAI
+  - RULE-SET,telegram,TELEGRAM
+  - RULE-SET,github,GITHUB
+  - RULE-SET,youtube,STREAMING
+  - RULE-SET,netflix,STREAMING
+  - RULE-SET,google,PROXY
+  - RULE-SET,cn,DIRECT
+  - RULE-SET,geolocation-!cn,PROXY
+  - RULE-SET,cnip,DIRECT,no-resolve
+  - MATCH,PROXY

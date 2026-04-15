@@ -17,7 +17,9 @@
 - `client.sh`
   纯 Linux 终端客户端脚本。负责下载 `mihomo`、生成本地 Clash 配置，并根据环境选择 `systemd --user`、`service` 或前台运行。
 - `examples/clash-client.yaml`
-  给 Clash for Windows、Clash Verge、Mihomo Party、OpenClash 这类图形客户端直接导入的示例配置。
+  最小可用的图形客户端示例配置，兼容面更大。
+- `examples/clash-client-cn.yaml`
+  更适合中国大陆用户的完整示例，带 DNS、规则集和常见分组，要求客户端使用 Mihomo / Clash.Meta 兼容内核。
 - `advanced/client-tun.sh`
   可选的 TUN 开关脚本。说明见 [advanced/README.md](advanced/README.md)。
 
@@ -28,7 +30,7 @@
 1. 服务端部署 Trojan：在服务器上运行 `server.sh`
 2. 客户端选择一种方式连接：
    - 纯 Linux 终端环境：运行 `client.sh`
-   - 图形客户端或路由器客户端：直接导入 `examples/clash-client.yaml`
+   - 图形客户端或路由器客户端：直接导入 `examples/` 里的示例配置
 
 如果你只是想让 Clash for Windows 一类工具连接服务端，不需要再运行 `client.sh`。
 
@@ -196,7 +198,15 @@ bash client.sh uninstall
 
 ```text
 examples/clash-client.yaml
+examples/clash-client-cn.yaml
 ```
+
+两份示例的区别：
+
+- `examples/clash-client.yaml`
+  最小可用版，规则最少，兼容面更大；如果只是想先连上，或者客户端内核比较旧，用这个。
+- `examples/clash-client-cn.yaml`
+  更适合中国大陆用户的默认用法，补了 DNS、rule-providers、广告拦截和常见分组；需要 Mihomo / Clash.Meta 兼容内核，首次导入时会自动下载规则集。
 
 导入前通常只需要改这 4 个值：
 
