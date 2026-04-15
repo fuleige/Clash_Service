@@ -155,17 +155,7 @@ bash client.sh update
 
 </details>
 
-之后在新开的终端里使用：
-
-```bash
-clash_service update
-clash_service start
-clash_service stop
-clash_service restart
-clash_service status
-```
-
-也可以直接调用脚本：
+之后直接调用脚本：
 
 ```bash
 bash client.sh update
@@ -182,7 +172,6 @@ bash client.sh uninstall
 
 - 如果你直接执行 `bash client.sh install` 或 `bash client.sh start`，当前这个终端不会被脚本反向改写；新开的终端会自动读取 `proxy.env`
 - 如果想让当前终端立刻生效，可以手动执行 `source ~/.config/clash-service/proxy.env`
-- 如果使用的是 `clash_service start` / `clash_service stop` 这个 shell 函数，当前终端也会同步更新代理环境变量
 - `stop` 或 `disable` 会把后续新终端中的代理环境变量一起清掉
 - 如果当前环境没有可用的后台服务管理器，`install` 会先写好配置，等你执行 `bash client.sh start` 后再以前台方式运行
 
@@ -382,7 +371,7 @@ bash client.sh start
 ~/.config/clash-service/proxy.env
 ```
 
-安装时会在当前 shell 的启动文件里加入一次 loader 和 `clash_service` 函数。以后开关代理，只改 `proxy.env`，不会反复往 `~/.bashrc` 或 `~/.zshrc` 里追加多段配置。
+安装时会在当前 shell 的启动文件里加入一次 `proxy.env` loader。以后开关代理，只改 `proxy.env`，不会反复往 `~/.bashrc` 或 `~/.zshrc` 里追加多段配置。
 
 如果你直接运行 `bash client.sh start` 或 `bash client.sh stop`，当前父终端不会被脚本反向修改；需要手动执行：
 

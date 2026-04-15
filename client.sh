@@ -54,10 +54,6 @@ Usage:
   bash client.sh uninstall
   bash client.sh help
 
-After install, open a new terminal and use:
-  clash_service start
-  clash_service stop
-
 Env:
   CLASH_SERVICE_CACHE_DIR=/path/to/cache
   CLASH_SERVICE_FORCE_DOWNLOAD=1
@@ -1054,12 +1050,10 @@ remove_loader_from_file() {
 }
 
 install_shell_loader() {
-  local rc_file proxy_env_path script_path script_path_shell
+  local rc_file proxy_env_path
 
   rc_file="$(detect_rc_file)"
   proxy_env_path="$(shell_quote "$PROXY_ENV_FILE")"
-  script_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
-  script_path_shell="$(shell_quote "$script_path")"
 
   mkdir -p "$(dirname "$rc_file")"
   touch "$rc_file"
@@ -1076,33 +1070,6 @@ if [ -f "\$__clash_service_proxy_env" ]; then
   . "\$__clash_service_proxy_env"
 fi
 unset __clash_service_proxy_env
-
-clash_service() {
-  __clash_service_script=${script_path_shell}
-  if CLASH_SERVICE_SHELL_FUNCTION=1 bash "\$__clash_service_script" "\$@"; then
-    __clash_service_status=0
-  else
-    __clash_service_status=\$?
-  fi
-
-  __clash_service_proxy_env="\${XDG_CONFIG_HOME:-\$HOME/.config}/clash-service/proxy.env"
-  if [ ! -f "\$__clash_service_proxy_env" ]; then
-    __clash_service_proxy_env=${proxy_env_path}
-  fi
-
-  case "\${1:-}" in
-    install | update | start | enable | restart | stop | disable | uninstall)
-      if [ -f "\$__clash_service_proxy_env" ]; then
-        . "\$__clash_service_proxy_env"
-      else
-        unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
-      fi
-      ;;
-  esac
-
-  unset __clash_service_script __clash_service_proxy_env
-  return "\$__clash_service_status"
-}
 ${RC_MARKER_END}
 EOF
 }
@@ -1127,11 +1094,7 @@ unset all_proxy
 unset ALL_PROXY
 EOF
 
-  if [ "${CLASH_SERVICE_SHELL_FUNCTION:-0}" = "1" ]; then
-    log "已启用代理并同步当前终端。"
-  else
-    log "已启用后续新终端代理。当前终端如需立即生效，请执行: source ${PROXY_ENV_FILE}"
-  fi
+  log "已启用后续新终端代理。当前终端如需立即生效，请执行: source ${PROXY_ENV_FILE}"
 }
 
 write_proxy_disabled_env() {
@@ -1146,11 +1109,7 @@ unset HTTPS_PROXY
 unset ALL_PROXY
 EOF
 
-  if [ "${CLASH_SERVICE_SHELL_FUNCTION:-0}" = "1" ]; then
-    log "已关闭代理并同步当前终端。"
-  else
-    log "已关闭后续新终端代理。当前终端如需立即生效，请执行: source ${PROXY_ENV_FILE}"
-  fi
+  log "已关闭后续新终端代理。当前终端如需立即生效，请执行: source ${PROXY_ENV_FILE}"
 }
 
 start_service() {
