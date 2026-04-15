@@ -29,6 +29,7 @@ MIHOMO_PROXY_NAME="${CLASH_SERVICE_PROXY_NAME:-trojan-service}"
 DEFAULT_LOCAL_PROXY_PORT="7890"
 RC_MARKER_BEGIN="# >>> clash-service proxy env >>>"
 RC_MARKER_END="# <<< clash-service proxy env <<<"
+ROOT_USAGE_WARNING_SHOWN=0
 
 log() {
   printf '[client] %s\n' "$*"
@@ -66,8 +67,11 @@ EOF
 }
 
 need_user() {
-  if [ "$(id -u)" -eq 0 ]; then
-    die "client.sh 默认安装到当前用户目录，请不要使用 sudo 运行。"
+  if [ "$(id -u)" -eq 0 ] && [ "$ROOT_USAGE_WARNING_SHOWN" -eq 0 ]; then
+    ROOT_USAGE_WARNING_SHOWN=1
+    log "警告: 检测到以 root 身份运行 client.sh。"
+    log "继续执行会写入当前用户目录: ${BIN_DIR}、${MIHOMO_CONFIG_DIR}、${STATE_DIR}"
+    log "更推荐使用普通用户运行；否则客户端会安装到 root 自己的环境中。"
   fi
 }
 
@@ -267,7 +271,9 @@ enable_linger_if_possible() {
 
   systemd_running || return
   command -v loginctl >/dev/null 2>&1 || return
-  command -v sudo >/dev/null 2>&1 || return
+  if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+    return
+  fi
 
   current_user="$(id -un)"
   if loginctl show-user "$current_user" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
@@ -275,7 +281,7 @@ enable_linger_if_possible() {
   fi
 
   log "尝试启用 systemd linger。"
-  sudo loginctl enable-linger "$current_user" || true
+  run_root loginctl enable-linger "$current_user" || true
 }
 
 client_service_name() {
@@ -296,7 +302,7 @@ client_service_mode() {
     fi
   fi
 
-  if service_available && command -v sudo >/dev/null 2>&1; then
+  if service_available && { [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1; }; then
     printf 'sysv'
     return
   fi

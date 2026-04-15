@@ -76,6 +76,8 @@ sudo bash server.sh uninstall
 bash client.sh install
 ```
 
+如果直接用 `root` 或 `sudo` 运行，脚本现在只会告警并继续执行，但会把 `mihomo`、配置和代理环境安装到 root 对应的用户目录里，通常不是你日常登录的那个用户环境。
+
 这个安装流程主要会做 4 件事：
 
 - 下载或复用 `mihomo`
